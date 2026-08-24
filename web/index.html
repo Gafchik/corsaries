@@ -10,17 +10,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1<% if (ctx.mode.cordova || ctx.mode.capacitor) { %>, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover<% } %>">
     <!--
       connect-src is deliberately wide open (any http/ws origin) in dev —
-      this whole block is stripped from the production build (see ctx.dev
-      below). It has to cover more than just 'localhost': the API/realtime
-      dev-proxy targets are reached by whatever host loaded the page, which
-      is 127.0.0.1, a LAN IP (phone testing over WiFi), or localhost
-      depending on how the page was opened — a narrower allowlist here
-      silently blocks the websocket connect and produces a white screen
-      (uncaught promise rejection during WorldPage's mount).
+      the API/realtime dev-proxy targets are reached by whatever host
+      loaded the page (127.0.0.1, a LAN IP for phone testing, localhost),
+      and a narrower allowlist there silently blocks the websocket connect,
+      producing a white screen (uncaught promise rejection during
+      WorldPage's mount — see git history for that exact bug).
+
+      Production is scoped instead: without an explicit connect-src here,
+      CSP falls back to default-src 'self', which covers the same-origin
+      /api/ fetches fine but blocks the realtime WebSocket outright — it's
+      wss:// on a different port, a different origin as far as CSP is
+      concerned. Hardcoded to the one real production domain rather than
+      derived from VITE_REALTIME_URL at build time, since Quasar's
+      index.html template doesn't have that env var in scope here — update
+      this by hand if the production realtime host/port ever changes.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://t.me https://*.telesco.pe;<% if (ctx.dev) { %> connect-src 'self' ws: http:; worker-src 'self' blob:;<% } %>"
+      content="default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://t.me https://*.telesco.pe;<% if (ctx.dev) { %> connect-src 'self' ws: http:; worker-src 'self' blob:;<% } else { %> connect-src 'self' wss://corsaries.slay-dev.space:2567; worker-src 'self' blob:;<% } %>"
     />
 
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
