@@ -18,16 +18,21 @@
 
       Production is scoped instead: without an explicit connect-src here,
       CSP falls back to default-src 'self', which covers the same-origin
-      /api/ fetches fine but blocks the realtime WebSocket outright — it's
-      wss:// on a different port, a different origin as far as CSP is
-      concerned. Hardcoded to the one real production domain rather than
-      derived from VITE_REALTIME_URL at build time, since Quasar's
-      index.html template doesn't have that env var in scope here — update
-      this by hand if the production realtime host/port ever changes.
+      /api/ fetches fine but blocks the realtime connection outright — it's
+      a different origin by port. Needs BOTH schemes for that host:port,
+      not just wss:// — colyseus.js's Client does a plain https:// POST to
+      /matchmake/joinOrCreate/:room first (to get a room + sessionId) and
+      only opens the wss:// connection after, so wss:// alone here still
+      let the initial fetch get silently CSP-blocked (surfaces in the
+      browser as a bare "Failed to fetch", no server involved at all).
+      Hardcoded to the one real production domain rather than derived from
+      VITE_REALTIME_URL at build time, since Quasar's index.html template
+      doesn't have that env var in scope here — update this by hand if the
+      production realtime host/port ever changes.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://t.me https://*.telesco.pe;<% if (ctx.dev) { %> connect-src 'self' ws: http:; worker-src 'self' blob:;<% } else { %> connect-src 'self' wss://corsaries.slay-dev.space:2567; worker-src 'self' blob:;<% } %>"
+      content="default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://t.me https://*.telesco.pe;<% if (ctx.dev) { %> connect-src 'self' ws: http:; worker-src 'self' blob:;<% } else { %> connect-src 'self' https://corsaries.slay-dev.space:2567 wss://corsaries.slay-dev.space:2567; worker-src 'self' blob:;<% } %>"
     />
 
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
