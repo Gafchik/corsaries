@@ -1,0 +1,15 @@
+// Battle Arena brand palette.
+// "You" reads blue throughout the app, "opponent" reads red — the same
+// color coding used in HpBar, ZoneIcon and the round log, so a player never
+// has to re-learn who's who between screens.
+$primary   : #2D5BEB; // you / defend
+$secondary : #1B2036; // ink, headers
+$accent    : #F5A623; // CTAs, highlights
+
+$positive  : #23B26D; // wins, unblocked defend
+$negative  : #E5484D; // opponent / attack / damage taken
+$warning   : #F5A623; // blocked-but-pierced damage
+$info      : #2D5BEB;
+
+$dark      : #1B2036;
+$dark-page : #14172A;

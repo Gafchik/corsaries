@@ -1,0 +1,11 @@
+# Root-level env — never commit real secrets/local overrides.
+.env
+.env.*
+!.env.example
+
+.DS_Store
+.idea/
+.vscode/
+
+# realtime/ has no package-level .gitignore of its own
+realtime/node_modules/

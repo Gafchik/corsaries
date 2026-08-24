@@ -1,0 +1,19 @@
+{
+  "name": "corsaries-realtime",
+  "version": "0.0.1",
+  "description": "Corsaries — shared open-world server (Colyseus)",
+  "type": "module",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@colyseus/core": "0.16.20",
+    "@colyseus/schema": "^3.0.0",
+    "@colyseus/ws-transport": "0.16.5",
+    "express": "^5.2.1",
+    "pg": "^8.13.0"
+  }
+}

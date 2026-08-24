@@ -1,0 +1,45 @@
+/* app global css */
+
+:root {
+  --ba-bg: #F3F4F8;
+  --ba-surface: #FFFFFF;
+  --ba-surface-2: #F8F9FC;
+  --ba-border: #E4E7EF;
+  --ba-ink: #1B2036;
+  --ba-ink-soft: #6B7086;
+  --ba-you: #2D5BEB;
+  --ba-you-soft: #EAF0FF;
+  --ba-opp: #E5484D;
+  --ba-opp-soft: #FDEBEC;
+  --ba-block: #F5A623;
+  --ba-block-soft: #FFF4E0;
+  --ba-win: #23B26D;
+  --ba-radius: 16px;
+  --ba-radius-sm: 10px;
+}
+
+/* Telegram's WebView paints its own (often dark) background behind the page.
+   Without an explicit opaque background here, that shows through anywhere
+   our own components don't set their own background, breaking text contrast. */
+html, body, #q-app {
+  background: var(--ba-bg);
+  color: var(--ba-ink);
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ba-card {
+  background: var(--ba-surface);
+  border: 1px solid var(--ba-border);
+  border-radius: var(--ba-radius);
+}
+
+.ba-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ba-ink-soft);
+}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+  <head>
+    <title><%= productName %></title>
+
+    <meta charset="utf-8">
+    <meta name="description" content="<%= productDescription %>">
+    <meta name="format-detection" content="telephone=no">
+    <meta name="msapplication-tap-highlight" content="no">
+    <meta name="viewport" content="width=device-width, initial-scale=1<% if (ctx.mode.cordova || ctx.mode.capacitor) { %>, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover<% } %>">
+    <!--
+      connect-src is deliberately wide open (any http/ws origin) in dev —
+      this whole block is stripped from the production build (see ctx.dev
+      below). It has to cover more than just 'localhost': the API/realtime
+      dev-proxy targets are reached by whatever host loaded the page, which
+      is 127.0.0.1, a LAN IP (phone testing over WiFi), or localhost
+      depending on how the page was opened — a narrower allowlist here
+      silently blocks the websocket connect and produces a white screen
+      (uncaught promise rejection during WorldPage's mount).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://t.me https://*.telesco.pe;<% if (ctx.dev) { %> connect-src 'self' ws: http:; worker-src 'self' blob:;<% } %>"
+    />
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <link rel="icon" type="image/png" sizes="128x128" href="icons/favicon-128x128.png">
+    <link rel="icon" type="image/png" sizes="96x96" href="icons/favicon-96x96.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16x16.png">
+    <link rel="icon" type="image/ico" href="favicon.ico">
+  </head>
+  <body>
+    <!-- quasar:entry-point -->
+  </body>
+</html>
