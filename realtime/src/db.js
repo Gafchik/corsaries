@@ -31,15 +31,22 @@ export async function awardBounty(userId, amount) {
 // to 0.95 for the requested 5-15% loss). Touches gold, cargo, and crew all
 // at once; a sailorless or emptied-hold ship is a perfectly valid resulting
 // state, not cleaned up specially.
+// $1 needs an explicit ::float cast in every query below — without it,
+// Postgres infers $1's type from the surrounding expression (coins * $1,
+// an integer column) as integer too, then chokes trying to parse the
+// actual 0.85-0.95 fraction as one ("invalid input syntax for type
+// integer"). Silently failed every single time in production — no death
+// penalty ever actually landed — until caught by reading the realtime
+// container's own error logs after deploy.
 export async function applyDeathPenalty(userId, survivalFraction) {
-  await pool.query('UPDATE users SET coins = FLOOR(coins * $1) WHERE id = $2', [survivalFraction, userId])
+  await pool.query('UPDATE users SET coins = FLOOR(coins * $1::float) WHERE id = $2', [survivalFraction, userId])
   await pool.query(
-    `UPDATE ship_products SET quantity = GREATEST(0, FLOOR(quantity * $1))
+    `UPDATE ship_products SET quantity = GREATEST(0, FLOOR(quantity * $1::float))
      WHERE ship_id = (SELECT id FROM ships WHERE user_id = $2)`,
     [survivalFraction, userId],
   )
   await pool.query(
-    `UPDATE ship_sailors SET count = GREATEST(0, FLOOR(count * $1))
+    `UPDATE ship_sailors SET count = GREATEST(0, FLOOR(count * $1::float))
      WHERE ship_id = (SELECT id FROM ships WHERE user_id = $2)`,
     [survivalFraction, userId],
   )
