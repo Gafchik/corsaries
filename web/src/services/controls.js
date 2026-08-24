@@ -310,9 +310,18 @@ class Controls {
   /** Resolves with the next captured KeyboardEvent.code (deviceType 'keyboard') or gamepad button index (deviceType 'gamepad'). Null if cancelled with Escape. */
   captureNext(deviceType) {
     this.capture = null
-    // Starts disarmed — whatever key/button is still held from activating
-    // this capture (see handleKeydown/update) has to be released first.
-    this.captureArmed = false
+    // Only starts disarmed if something's actually already held right now
+    // — that's the activating key/button (Действие on a gamepad, or
+    // Enter/Space if a keyboard-only player triggered the rebind button),
+    // which has to be released before a press counts, or it'd capture
+    // itself. But rebinding is just as often started with a plain mouse
+    // click, where NOTHING is held — disarming unconditionally there had
+    // the opposite bug: the player's real first keypress got silently
+    // eaten waiting for a "release" that already happened before capture
+    // even began, and only their *second* press ever got captured.
+    this.captureArmed = deviceType === 'gamepad'
+      ? !this.firstGamepad()?.buttons.some((b) => b.pressed)
+      : this.keysDown.size === 0
     return new Promise((resolve) => {
       this.capture = { deviceType, resolve }
     })
