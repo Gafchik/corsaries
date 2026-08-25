@@ -327,13 +327,28 @@ export class WorldRoom extends Room {
     // being close enough to dock blocks the boarding, not just the target's
     // side: sitting in port territory yourself shouldn't be a free pass to
     // jump someone else either.
-    if (this.isNearAnyPort(challenger.x, challenger.y) || this.isNearAnyPort(target.x, target.y)) return
+    if (this.isNearAnyPort(challenger.x, challenger.y) || this.isNearAnyPort(target.x, target.y)) {
+      client.send('abordage_rejected', { reason: 'in_port_zone' })
+      return
+    }
 
+    // ABORDAGE_RANGE (70) is intentionally tight ("вплотную"), and the
+    // client only shows the prompt once it's already this close — but a
+    // moving target plus the round-trip to get here is enough to have
+    // sailed back out of range by now. Used to just silently do nothing,
+    // which from the challenger's side looked exactly like a broken
+    // feature (target sails on, no explanation) rather than a clean miss.
     const distance = Math.hypot(target.x - challenger.x, target.y - challenger.y)
-    if (distance > ABORDAGE_RANGE) return
+    if (distance > ABORDAGE_RANGE) {
+      client.send('abordage_rejected', { reason: 'out_of_range' })
+      return
+    }
 
     const result = await laravelPost('/abordage/pvp', challenger.authToken, { opponent_user_id: target.userId })
-    if (!result?.abordage) return
+    if (!result?.abordage) {
+      client.send('abordage_rejected', { reason: 'server_error' })
+      return
+    }
 
     client.send('abordage_started', { abordageId: result.abordage.id })
     this.clients.find((c) => c.sessionId === targetSessionId)?.send('abordage_started', { abordageId: result.abordage.id })

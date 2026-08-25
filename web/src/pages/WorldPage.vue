@@ -648,6 +648,16 @@ class WorldScene extends Phaser.Scene {
     // startPvpAbordage in WorldRoom.js. No accept/decline: both clients
     // just get redirected the instant Laravel confirms the fight exists.
     this.room.onMessage('abordage_started', ({ abordageId }) => this.onAbordageStarted(abordageId))
+
+    // ABORDAGE_RANGE is tight (70 units, "вплотную") — a moving target plus
+    // the round-trip to the server is enough to have sailed back out of
+    // range by the time this resolves. Used to just do nothing, which read
+    // as the feature being silently broken; this at least says why.
+    const REJECTION_TEXT = { in_port_zone: 'В зоне порта нельзя', out_of_range: 'Слишком далеко', server_error: 'Не удалось начать абордаж' }
+    this.room.onMessage('abordage_rejected', ({ reason }) => {
+      const toast = this.add.text(this.ship.x, this.ship.y - 40, REJECTION_TEXT[reason] ?? 'Абордаж не удался', { fontSize: '13px', color: '#ff9d94' }).setOrigin(0.5)
+      this.tweens.add({ targets: toast, y: toast.y - 24, alpha: 0, duration: 1100, onComplete: () => toast.destroy() })
+    })
   }
 
   /**
