@@ -2,12 +2,17 @@
   <q-page class="controls-page">
     <div ref="pageRef" class="sheet">
     <div class="header">
-      <button class="back-btn" @click="$router.back()">← Назад</button>
+      <button class="back-btn" @click="$router.back()">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15,4 7,12 15,20"/></svg>
+        Назад
+      </button>
       <div class="title">Управление</div>
     </div>
 
     <div class="tabs">
       <button v-for="t in tabs" :key="t.key" class="tab-btn" :class="{ active: tab === t.key }" @click="tab = t.key">
+        <svg v-if="t.key === 'keyboard'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="13" rx="2"/><line x1="6" y1="10" x2="6" y2="10"/><line x1="10" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="14" y2="10"/><line x1="18" y1="10" x2="18" y2="10"/><line x1="6" y1="14" x2="18" y2="14"/></svg>
+        <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="10" rx="5"/><line x1="7" y1="12" x2="7" y2="12"/><line x1="17" y1="11" x2="17" y2="11"/></svg>
         {{ t.label }}
       </button>
     </div>
@@ -26,7 +31,10 @@
     </div>
 
     <div v-else class="section">
-      <div class="section__hint-row">{{ gamepadConnected ? '🎮 Геймпад подключён' : '🎮 Геймпад не обнаружен' }}</div>
+      <div class="section__hint-row">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="10" rx="5"/><line x1="7" y1="12" x2="7" y2="12"/><line x1="17" y1="11" x2="17" y2="11"/></svg>
+        {{ gamepadConnected ? 'Геймпад подключён' : 'Геймпад не обнаружен' }}
+      </div>
       <div class="row__label row__label--note">Движение всегда на левом стике — тут только кнопки</div>
       <div class="row" v-for="a in PRESS_ACTIONS" :key="'gp-' + a">
         <div class="row__label">{{ ACTION_LABELS[a] }}</div>
@@ -153,7 +161,7 @@ useMenuNav(pageRef, { watchSource: () => [tab.value, capturing.value] })
 <style scoped>
 .controls-page {
   min-height: 100vh;
-  background: linear-gradient(180deg, #1a2c32 0%, #142127 100%);
+  background: radial-gradient(140% 70% at 50% -10%, var(--c-bg-mid) 0%, var(--c-bg-deep) 60%), var(--c-bg-deep);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -165,63 +173,65 @@ useMenuNav(pageRef, { watchSource: () => [tab.value, capturing.value] })
   width: min(480px, 100%);
   max-height: 90vh;
   overflow-y: auto;
-  background: linear-gradient(180deg, #1a2c32 0%, #142127 100%);
-  border: 1px solid #2c4046;
+  background: var(--c-bg-deep);
+  border: 1px solid var(--c-border);
   border-radius: 16px;
   padding: 22px 20px;
-  color: #eef5f3;
+  color: var(--c-ink);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
 }
 
 .header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
-.back-btn { background: none; border: none; font-size: 14px; cursor: pointer; color: #9fc2ba; }
-.title { font-size: 20px; font-weight: 800; }
+.back-btn { display: flex; align-items: center; gap: 6px; background: none; border: none; font-size: 14px; cursor: pointer; color: var(--c-ink-soft); padding: 0; }
+.title { font-family: var(--font-display); font-size: 22px; letter-spacing: 0.01em; }
 
 .tabs { display: flex; gap: 6px; margin-bottom: 18px; }
 .tab-btn {
   flex: 1;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
   padding: 9px 4px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.05);
-  color: #eef5f3;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-ink-soft);
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
 }
-.tab-btn.active { background: linear-gradient(135deg, #2f7d4f, #256640); border-color: transparent; color: #fff; }
+.tab-btn svg { width: 17px; height: 17px; }
+.tab-btn.active { background: rgba(217, 164, 65, 0.14); border-color: rgba(217, 164, 65, 0.4); color: var(--c-gold-bright); }
 
 .section { margin-bottom: 22px; }
-.section__hint-row { font-size: 13px; color: #9fc2ba; margin-bottom: 10px; }
+.section__hint-row { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--c-ink-soft); margin-bottom: 10px; }
 
-.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--c-border); }
 .row__label { font-size: 14px; }
-.row__label--note { font-size: 12px; color: #6f8b85; border-bottom: none; padding-bottom: 4px; }
+.row__label--note { font-size: 12px; color: var(--c-ink-faint); border-bottom: none; padding-bottom: 4px; }
 
 .bind-btn {
   min-width: 130px;
   padding: 8px 12px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.06);
-  color: #eef5f3;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-ink);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   text-align: center;
 }
-.bind-btn--capturing { border-color: #6fd98a; color: #6fd98a; background: rgba(111, 217, 138, 0.1); }
+.bind-btn--capturing { border-color: var(--c-gold-bright); color: var(--c-gold-bright); background: rgba(217, 164, 65, 0.1); }
 
 .footer { display: flex; gap: 10px; margin-top: 16px; }
 .cancel-btn, .reset-btn {
-  padding: 10px 16px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.06); color: #eef5f3; cursor: pointer; font-size: 13px;
+  padding: 10px 16px; border-radius: 10px; border: 1px solid var(--c-border);
+  background: var(--c-surface); color: var(--c-ink); cursor: pointer; font-size: 13px;
 }
-.cancel-btn { border-color: #e05a5a; color: #e05a5a; background: rgba(224, 90, 90, 0.08); }
+.cancel-btn { border-color: var(--c-danger); color: var(--c-danger); background: rgba(226, 104, 94, 0.1); }
 
 /* Plain :focus, not :focus-visible — see the same note in PortPage.vue. */
 .controls-page :focus {
-  outline: 3px solid #2f7d4f;
+  outline: 3px solid var(--c-gold-bright);
   outline-offset: 2px;
 }
 </style>

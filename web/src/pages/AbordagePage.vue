@@ -94,9 +94,13 @@
               <span class="move-chip">Атака: {{ zoneLabel(r.you.attack) }}</span>
               <span class="move-chip">Защита: {{ r.you.defend.map(zoneLabel).join(', ') }}</span>
             </div>
-            <div v-else class="fighter-row__idle">😴 Не успел(а) сходить</div>
+            <div v-else class="fighter-row__idle">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" v-html="resultIcon('idle')"></svg>
+              Не успел(а) сходить
+            </div>
             <div class="fighter-row__result" :class="`fighter-row__result--${r.you.result.tone}`">
-              <span>{{ r.you.result.icon }}</span> {{ r.you.result.text }}
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" v-html="resultIcon(r.you.result.tone)"></svg>
+              {{ r.you.result.text }}
             </div>
           </div>
 
@@ -109,9 +113,13 @@
               <span class="move-chip">Атака: {{ zoneLabel(r.opp.attack) }}</span>
               <span class="move-chip">Защита: {{ r.opp.defend.map(zoneLabel).join(', ') }}</span>
             </div>
-            <div v-else class="fighter-row__idle">😴 Не успел(а) сходить</div>
+            <div v-else class="fighter-row__idle">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" v-html="resultIcon('idle')"></svg>
+              Не успел(а) сходить
+            </div>
             <div class="fighter-row__result" :class="`fighter-row__result--${r.opp.result.tone}`">
-              <span>{{ r.opp.result.icon }}</span> {{ r.opp.result.text }}
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" v-html="resultIcon(r.opp.result.tone)"></svg>
+              {{ r.opp.result.text }}
             </div>
           </div>
         </div>
@@ -144,6 +152,18 @@ let pollTimer = null
 const zones = ['head', 'chest', 'groin', 'legs']
 const zoneNames = { head: 'Голова', chest: 'Грудь', groin: 'Пах', legs: 'Ноги' }
 const zoneLabel = (z) => zoneNames[z]
+
+// Раунд-лог раньше отмечал исход эмодзи (🛡️💨💥😴) — тот же набор
+// стро́ковых иконок, что и везде в интерфейсе, по тону исхода.
+const RESULT_ICONS = {
+  block: '<path d="M12 3 L19 6 V11 C19 16 16 19.5 12 21 C8 19.5 5 16 5 11 V6 Z"/>',
+  dodge: '<path d="M3 9 C7 9 9 7 13 7"/><path d="M3 13 C8 13 12 15 17 15"/><path d="M3 17 C6 17 8 16 11 16"/>',
+  hit: '<path d="M12 2 L14 10 L22 12 L14 14 L12 22 L10 14 L2 12 L10 10 Z"/>',
+  idle: '<circle cx="12" cy="12" r="9"/><path d="M12 7 v5 l3 3"/>',
+}
+function resultIcon(tone) {
+  return RESULT_ICONS[tone] ?? RESULT_ICONS.idle
+}
 
 const attack = ref(null)
 const defend = ref([])
@@ -197,16 +217,16 @@ function outcomeFor(round, mine, theirsLabel) {
 
   let result
   if (theirAttack === null) {
-    result = { text: `${theirsLabel} не успел(а) сходить`, tone: 'idle', icon: '—' }
+    result = { text: `${theirsLabel} не успел(а) сходить`, tone: 'idle' }
   } else if (wasBlocked) {
-    result = { text: `Заблокировал(а) — −${damageTaken} HP`, tone: 'block', icon: '🛡️' }
+    result = { text: `Заблокировал(а) — −${damageTaken} HP`, tone: 'block' }
   } else if (damageTaken === 0) {
     // No stored 'dodged' flag — a landed attack (theirAttack isn't null)
     // that wasn't blocked and did 0 damage can only be a dodge, see
     // BattleEngine::rollAttack.
-    result = { text: 'Уворот!', tone: 'dodge', icon: '💨' }
+    result = { text: 'Уворот!', tone: 'dodge' }
   } else {
-    result = { text: `Получил(а) удар — −${damageTaken} HP`, tone: 'hit', icon: '💥' }
+    result = { text: `Получил(а) удар — −${damageTaken} HP`, tone: 'hit' }
   }
 
   return { moved: myAttack !== null, attack: myAttack, defend: myDefend, hpAfter, result }
@@ -326,55 +346,55 @@ watch([attack, defend], () => nextTick(refreshItems), { deep: true })
 <style scoped>
 .abordage-page {
   min-height: 100vh;
-  background: linear-gradient(180deg, #1a2c32 0%, #142127 100%);
+  background: radial-gradient(140% 70% at 50% -10%, var(--c-bg-mid) 0%, var(--c-bg-deep) 60%), var(--c-bg-deep);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 16px;
   box-sizing: border-box;
 }
-.text-center.q-mt-xl { color: #9fc2ba; }
+.text-center.q-mt-xl { color: var(--c-ink-soft); }
 
 .sheet {
   width: min(480px, 100%);
   max-height: 90vh;
   overflow-y: auto;
-  background: linear-gradient(180deg, #1a2c32 0%, #142127 100%);
-  border: 1px solid #2c4046;
+  background: var(--c-bg-deep);
+  border: 1px solid var(--c-border);
   border-radius: 16px;
   padding: 22px 20px;
-  color: #eef5f3;
+  color: var(--c-ink);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
 }
 
 .hero { text-align: center; margin-bottom: 18px; }
-.hero__title { font-size: 20px; font-weight: 800; }
+.hero__title { font-family: var(--font-display); font-size: 21px; letter-spacing: 0.01em; }
 
 .hp-bars { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
 .hp-bar__label { font-size: 13px; font-weight: 700; margin-bottom: 5px; }
 .hp-bar__track { height: 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
-.hp-bar__fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, #3fae66, #6fd98a); transition: width 0.2s; }
-.hp-bar__fill--enemy { background: linear-gradient(90deg, #af3d3d, #e05a5a); }
-.hp-bar__stats { font-size: 11px; color: #9fc2ba; margin-top: 4px; }
+.hp-bar__fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--c-gold), var(--c-success)); transition: width 0.2s; }
+.hp-bar__fill--enemy { background: linear-gradient(90deg, #a3392f, var(--c-danger)); }
+.hp-bar__stats { font-size: 11px; color: var(--c-ink-soft); margin-top: 4px; }
 
-.picker__label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #9fc2ba; margin: 16px 0 8px; }
+.picker__label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-ink-soft); margin: 16px 0 8px; }
 .zones { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .zone-btn {
   padding: 12px 4px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.05);
-  color: #eef5f3;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-ink);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
 }
-.zone-btn.active { background: linear-gradient(135deg, #2f7d4f, #256640); border-color: transparent; color: #fff; }
+.zone-btn.active { background: rgba(217, 164, 65, 0.16); border-color: rgba(217, 164, 65, 0.45); color: var(--c-gold-bright); }
 
-.error-text { color: #ff8080; font-size: 13px; margin-top: 8px; }
+.error-text { color: var(--c-danger); font-size: 13px; margin-top: 8px; }
 
 .waiting { text-align: center; margin-top: 28px; }
-.waiting__text { font-size: 14px; color: #9fc2ba; }
+.waiting__text { font-size: 14px; color: var(--c-ink-soft); }
 
 .submit-btn {
   width: 100%;
@@ -382,7 +402,7 @@ watch([attack, defend], () => nextTick(refreshItems), { deep: true })
   padding: 13px;
   border-radius: 10px;
   border: none;
-  background: linear-gradient(135deg, #af3d3d, #8c2f2f);
+  background: linear-gradient(135deg, #c96b60, var(--c-danger));
   color: #fff;
   font-weight: 700;
   cursor: pointer;
@@ -390,59 +410,60 @@ watch([attack, defend], () => nextTick(refreshItems), { deep: true })
 .submit-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* Round-by-round log — structure lifted from battle-arena's
-   RoundLogEntry.vue, recolored for our dark palette (green = you, red =
-   opponent, same as the HP bars above). */
+   RoundLogEntry.vue, recolored for our nautical palette (gold = you,
+   danger red = opponent, same as the HP bars above). */
 .log { margin-top: 20px; }
-.log__title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #9fc2ba; margin-bottom: 10px; }
+.log__title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-ink-soft); margin-bottom: 10px; }
 
-.round-entry { padding: 12px 0; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.round-entry { padding: 12px 0; border-top: 1px solid var(--c-border); }
 .round-entry:first-child { border-top: none; padding-top: 0; }
-.round-entry__title { font-weight: 700; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #6f8b85; margin-bottom: 8px; }
+.round-entry__title { font-weight: 700; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--c-ink-faint); margin-bottom: 8px; }
 
 .fighter-row {
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(111, 217, 138, 0.08);
-  border: 1px solid rgba(111, 217, 138, 0.15);
+  background: rgba(217, 164, 65, 0.08);
+  border: 1px solid rgba(217, 164, 65, 0.18);
   margin-bottom: 8px;
 }
 .fighter-row--opp {
-  background: rgba(224, 90, 90, 0.08);
-  border-color: rgba(224, 90, 90, 0.15);
+  background: rgba(226, 104, 94, 0.08);
+  border-color: rgba(226, 104, 94, 0.18);
   margin-bottom: 0;
 }
 
 .fighter-row__head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
 .fighter-row__name { font-weight: 700; font-size: 13px; }
-.fighter-row--you .fighter-row__name { color: #6fd98a; }
-.fighter-row--opp .fighter-row__name { color: #e05a5a; }
-.fighter-row__hp { font-size: 11px; color: #9fc2ba; font-weight: 600; font-variant-numeric: tabular-nums; }
+.fighter-row--you .fighter-row__name { color: var(--c-gold-bright); }
+.fighter-row--opp .fighter-row__name { color: var(--c-danger); }
+.fighter-row__hp { font-size: 11px; color: var(--c-ink-soft); font-weight: 600; font-variant-numeric: tabular-nums; }
 
 .fighter-row__moves { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 5px; }
-.move-chip { font-size: 12px; color: #c9dcd8; }
+.move-chip { font-size: 12px; color: var(--c-ink-soft); }
 
-.fighter-row__idle { font-size: 12px; color: #6f8b85; margin-bottom: 5px; font-style: italic; }
+.fighter-row__idle { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--c-ink-faint); margin-bottom: 5px; font-style: italic; }
 
 .fighter-row__result { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; }
-.fighter-row__result--idle { color: #6f8b85; font-weight: 600; }
-.fighter-row__result--block { color: #e0b06a; }
-.fighter-row__result--dodge { color: #6fd0d9; }
-.fighter-row__result--hit { color: #ff8080; }
+.fighter-row__result svg { flex: none; }
+.fighter-row__result--idle { color: var(--c-ink-faint); font-weight: 600; }
+.fighter-row__result--block { color: var(--c-gold-bright); }
+.fighter-row__result--dodge { color: #7fd4e0; }
+.fighter-row__result--hit { color: #ff9d94; }
 
 .result { text-align: center; margin-top: 28px; }
-.result__title { font-size: 19px; font-weight: 800; margin-bottom: 6px; }
-.result__loot { font-size: 14px; color: #ffd166; font-weight: 700; margin-bottom: 16px; }
-.result__crew { font-size: 13px; color: #9fc2ba; margin-bottom: 4px; }
+.result__title { font-family: var(--font-display); font-size: 20px; margin-bottom: 6px; }
+.result__loot { font-size: 14px; color: var(--c-gold-bright); font-weight: 700; margin-bottom: 16px; }
+.result__crew { font-size: 13px; color: var(--c-ink-soft); margin-bottom: 4px; }
 .result__crew--enemy { margin-bottom: 12px; }
-.result__crew-loss { color: #e05a5a; font-weight: 700; }
+.result__crew-loss { color: var(--c-danger); font-weight: 700; }
 
 .leave-btn {
   width: 100%;
   padding: 12px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid var(--c-border);
   background: transparent;
-  color: #eef5f3;
+  color: var(--c-ink);
   font-weight: 700;
   cursor: pointer;
 }
@@ -451,8 +472,8 @@ watch([attack, defend], () => nextTick(refreshItems), { deep: true })
   padding: 12px;
   border-radius: 10px;
   border: none;
-  background: linear-gradient(135deg, #2f7d4f, #256640);
-  color: #fff;
+  background: linear-gradient(135deg, var(--c-gold-bright), var(--c-gold));
+  color: #2c1c05;
   font-weight: 700;
   cursor: pointer;
   margin-bottom: 10px;
@@ -460,7 +481,7 @@ watch([attack, defend], () => nextTick(refreshItems), { deep: true })
 
 /* Plain :focus, not :focus-visible — see the same note in PortPage.vue. */
 .abordage-page :focus {
-  outline: 3px solid #6fd98a;
+  outline: 3px solid var(--c-gold-bright);
   outline-offset: 2px;
 }
 </style>

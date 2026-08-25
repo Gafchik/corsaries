@@ -32,10 +32,15 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://t.me https://*.telesco.pe;<% if (ctx.dev) { %> connect-src 'self' ws: http:; worker-src 'self' blob:;<% } else { %> connect-src 'self' https://corsaries.slay-dev.space:2567 wss://corsaries.slay-dev.space:2567; worker-src 'self' blob:;<% } %>"
+      content="default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://t.me https://*.telesco.pe;<% if (ctx.dev) { %> connect-src 'self' ws: http:; worker-src 'self' blob:;<% } else { %> connect-src 'self' https://corsaries.slay-dev.space:2567 wss://corsaries.slay-dev.space:2567; worker-src 'self' blob:;<% } %>"
     />
 
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <!-- Yeseva One (display, hero titles/logo) + PT Sans (UI text, full Cyrillic) — see web/src/css/app.css for the palette these pair with. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Yeseva+One&family=PT+Sans:wght@400;700&display=swap" rel="stylesheet">
 
     <link rel="icon" type="image/png" sizes="128x128" href="icons/favicon-128x128.png">
     <link rel="icon" type="image/png" sizes="96x96" href="icons/favicon-96x96.png">

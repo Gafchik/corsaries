@@ -28,19 +28,30 @@
         <span class="context-prompt__hint">Действие</span>
       </div>
 
+      <!-- Always visible (keyboard/gamepad players want to see this too, not
+           just touch) — two reload rings for the broadsides. Doubles as the
+           touch fire buttons on a phone (pointerdown), and stays a clickable
+           mouse target everywhere else as a bonus, not a requirement. -->
+      <div class="broadside-hud">
+        <button class="broadside-ring" :style="broadsideRingStyle(leftReloadFraction)" @pointerdown.prevent="controls.touchPress('fireLeft')">
+          <span class="broadside-ring__inner">
+            <svg viewBox="0 0 24 24" fill="none" :stroke="leftReloadFraction >= 1 ? 'var(--c-success)' : 'rgba(238,245,242,0.45)'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/></svg>
+          </span>
+        </button>
+        <button class="broadside-ring" :style="broadsideRingStyle(rightReloadFraction)" @pointerdown.prevent="controls.touchPress('fireRight')">
+          <span class="broadside-ring__inner">
+            <svg viewBox="0 0 24 24" fill="none" :stroke="rightReloadFraction >= 1 ? 'var(--c-success)' : 'rgba(238,245,242,0.45)'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/></svg>
+          </span>
+        </button>
+      </div>
+
       <!-- Touch-only: a phone with no gamepad paired (see showTouchControls)
-           gets an on-screen stick + fire/action buttons instead of relying on
+           gets an on-screen stick + action button instead of relying on
            WASD/gamepad. Sits above the canvas, so a tap here never also
            reaches the canvas's own pointerdown-fires-cannon handler below. -->
       <div v-if="showTouchControls" class="touch-controls">
         <TouchJoystick class="touch-controls__stick" />
-        <div class="touch-controls__buttons">
-          <button class="touch-btn touch-btn--fire" @pointerdown.prevent="controls.touchPress('fireRight')">Правый борт</button>
-          <div class="touch-controls__row">
-            <button class="touch-btn touch-btn--fire" @pointerdown.prevent="controls.touchPress('fireLeft')">Левый борт</button>
-            <button class="touch-btn touch-btn--action" @pointerdown.prevent="controls.touchPress('action')">Действие</button>
-          </div>
-        </div>
+        <button class="touch-btn" @pointerdown.prevent="controls.touchPress('action')">Действие</button>
       </div>
 
       <ShipInfoOverlay v-if="showInfo" :ship-info="shipInfo" :coins="coins" @close="showInfo = false" />
@@ -67,6 +78,40 @@ const nearHuman = ref(null)
 const showInfo = ref(false)
 const shipInfo = ref(null)
 const coins = ref(0)
+
+// Broadside готовность/перезарядка — 0 = только что выстрелил, 1 = готов.
+// Optimistic/predicted from the moment 'fire' is sent (see fireBroadside in
+// WorldScene below), not confirmed by the server — the server enforces the
+// real cooldown independently and just silently ignores an early shot, so
+// worst case this ring is briefly wrong instead of the fire being blocked.
+const leftFiredAt = ref(0)
+const rightFiredAt = ref(0)
+const cooldownTick = ref(0)
+let cooldownRaf = null
+function pumpCooldownTick() {
+  cooldownTick.value = Date.now()
+  const stillCooling = Date.now() - leftFiredAt.value < FIRE_COOLDOWN_MS || Date.now() - rightFiredAt.value < FIRE_COOLDOWN_MS
+  cooldownRaf = stillCooling ? requestAnimationFrame(pumpCooldownTick) : null
+}
+function noteBroadsideFired(uiSide) {
+  const now = Date.now()
+  if (uiSide === 'fireLeft') leftFiredAt.value = now
+  else rightFiredAt.value = now
+  if (!cooldownRaf) cooldownRaf = requestAnimationFrame(pumpCooldownTick)
+}
+const leftReloadFraction = computed(() => {
+  void cooldownTick.value
+  return Math.min(1, (Date.now() - leftFiredAt.value) / FIRE_COOLDOWN_MS)
+})
+const rightReloadFraction = computed(() => {
+  void cooldownTick.value
+  return Math.min(1, (Date.now() - rightFiredAt.value) / FIRE_COOLDOWN_MS)
+})
+function broadsideRingStyle(fraction) {
+  const deg = Math.round(fraction * 360)
+  const color = fraction >= 1 ? 'var(--c-success)' : 'var(--c-gold-bright)'
+  return { background: `conic-gradient(${color} ${deg}deg, rgba(255,255,255,0.14) ${deg}deg 360deg)` }
+}
 // A gamepad paired to the phone is a better fit than an on-screen stick
 // crowding the same screen — reactive because a Bluetooth controller can
 // connect (or run out of battery and drop) mid-session, same pattern
@@ -103,6 +148,12 @@ const OTHER_SHIP_LERP = 0.2 // fraction of remaining distance/angle closed per r
 const CANNON_RANGE = 260
 const CANNONBALL_SPEED = 600 // px/s
 
+// Keep in sync with FIRE_COOLDOWN_MS in realtime/src/rooms/WorldRoom.js —
+// purely a predicted/optimistic display (see noteBroadsideFired below), the
+// server enforces the real cooldown independently and just ignores an early
+// 'fire' rather than telling the client to correct its guess.
+const FIRE_COOLDOWN_MS = 900
+
 // Must match SHORE_POINT_COUNT in realtime/src/worldgen.js — how many
 // boundary samples each synced island's `points` array carries.
 const SHORE_POINT_COUNT = 16
@@ -117,13 +168,41 @@ const SHIP_TYPE_NAMES = {
 }
 const NAME_TEXT_STYLE = { fontSize: '12px', color: '#ffffff', stroke: '#0a1f28', strokeThickness: 3 }
 const HP_BAR_WIDTH = 36
-const HP_BAR_HEIGHT = 4
+const HP_BAR_HEIGHT = 5
 // Between the ship and its name label (name sits at -28) — reads as
 // "belongs to this ship" without overlapping either.
 const HP_BAR_Y_OFFSET = -21
 
 function shipLabel(name, shipType) {
   return `${name} (${SHIP_TYPE_NAMES[shipType] ?? shipType})`
+}
+
+// Closed Catmull-Rom spline through a cyclic ring of points — real coasts
+// don't have corners, but the raw boundary (SHORE_POINT_COUNT samples
+// connected point-to-point) does. Purely a drawing concern: collision (see
+// collidesWithIsland) keeps walking the original straight-line-interpolated
+// boundary untouched, so a ship's actual stopping point never moves, only
+// where the shore is painted relative to it — and the existing +20 buffer
+// in that check already covers the small gap a smoothed curve opens up.
+function smoothClosedPoints(points, segmentsPerEdge = 8) {
+  const n = points.length
+  const out = []
+  for (let i = 0; i < n; i++) {
+    const p0 = points[(i - 1 + n) % n]
+    const p1 = points[i]
+    const p2 = points[(i + 1) % n]
+    const p3 = points[(i + 2) % n]
+    for (let s = 0; s < segmentsPerEdge; s++) {
+      const t = s / segmentsPerEdge
+      const t2 = t * t
+      const t3 = t2 * t
+      out.push({
+        x: 0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+        y: 0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+      })
+    }
+  }
+  return out
 }
 
 // Aggressive bots red, calm bots light orange, real players white — the
@@ -155,6 +234,7 @@ class WorldScene extends Phaser.Scene {
     this.onLootAvailable = data.onLootAvailable
     this.onAbordageStarted = data.onAbordageStarted
     this.onActionPress = data.onActionPress
+    this.onFireBroadside = data.onFireBroadside
     this.onInventoryPress = data.onInventoryPress
     this.onBackPress = data.onBackPress
     this.currentNearPortId = null
@@ -165,10 +245,13 @@ class WorldScene extends Phaser.Scene {
   preload() {
     // Kenney's Pirate Pack (CC0) — top-down, bow pointing up, so it drops
     // straight into the existing rotation convention with no math changes.
-    // One sprite per hull type (config/ships.php order) — every ship on
-    // screen now actually looks like what it is, boats included.
+    // (A flat vector redraw replaced these briefly — reverted: the actual
+    // pixel art reads better than a hand-rolled silhouette.)
     for (const type of SHIP_TYPES) this.load.image(`ship-${type}`, `ships/ship-${type}.png`)
-    this.load.image('vegetation', 'islands/vegetation.png')
+    // Port marker — one icon from CraftPix.net's "48 Pirate Stuff Icons"
+    // (opengameart.org/content/48-pirate-stuff-icons, OGA-BY 3.0, credit
+    // required). Replaced a hand-drawn flag glyph that read as unclear.
+    this.load.image('port-marker', 'markers/port-anchor.png')
   }
 
   create() {
@@ -188,18 +271,106 @@ class WorldScene extends Phaser.Scene {
     cannonballTexture.generateTexture('cannonball', 8, 8)
     cannonballTexture.destroy()
 
+    // Water used to be nothing but the renderer's flat clear color — a
+    // tiled procedural texture instead (no water asset exists in the Kenney
+    // pack the ships/islands come from, so this is drawn, not loaded):
+    // a deep base tone plus a handful of long, gently offset wave lines
+    // repeated across a 512² tile. Sits at depth -10, well behind islands
+    // (depth 0) and ships (depth 0/1) — see their setDepth calls below.
+    const waterTexture = this.make.graphics({ x: 0, y: 0 })
+    waterTexture.fillStyle(0x123039, 1)
+    waterTexture.fillRect(0, 0, 512, 512)
+    waterTexture.lineStyle(2, 0x1a4048, 0.8)
+    for (let row = 0; row < 6; row++) {
+      const y = row * 90 + 20
+      waterTexture.beginPath()
+      waterTexture.moveTo(-20, y)
+      waterTexture.lineTo(140, y + 16)
+      waterTexture.lineTo(300, y - 12)
+      waterTexture.lineTo(460, y + 10)
+      waterTexture.lineTo(540, y - 4)
+      waterTexture.strokePath()
+    }
+    waterTexture.lineStyle(1.5, 0x0e2830, 0.6)
+    for (let row = 0; row < 5; row++) {
+      const y = row * 95 + 65
+      waterTexture.beginPath()
+      waterTexture.moveTo(-20, y)
+      waterTexture.lineTo(160, y - 14)
+      waterTexture.lineTo(340, y + 12)
+      waterTexture.lineTo(540, y - 8)
+      waterTexture.strokePath()
+    }
+    waterTexture.generateTexture('water-tile', 512, 512)
+    waterTexture.destroy()
+
+    this.waterTile = this.add.tileSprite(0, 0, MAP_SIZE, MAP_SIZE, 'water-tile').setOrigin(0, 0).setDepth(-10)
+
+    // Island foliage — used to be a single loaded blob-shaped PNG that read
+    // as an unclear smudge at a glance. Drawn instead as a small round
+    // canopy cluster (three overlapping fills, dark-to-light) with a trunk
+    // peeking out the bottom — the same top-down "leaf cluster from above"
+    // convention most top-down games draw a tree as.
+    const treeTexture = this.make.graphics({ x: 0, y: 0 })
+    treeTexture.fillStyle(0x6b4a2a, 1)
+    treeTexture.fillCircle(16, 25, 4)
+    treeTexture.fillStyle(0x1f5a38, 1)
+    treeTexture.fillCircle(10, 15, 9)
+    treeTexture.fillCircle(22, 15, 9)
+    treeTexture.fillCircle(16, 9, 10)
+    treeTexture.fillStyle(0x2f7d4f, 1)
+    treeTexture.fillCircle(16, 12, 8)
+    treeTexture.fillStyle(0x4fae72, 0.85)
+    treeTexture.fillCircle(13, 8, 4.5)
+    treeTexture.generateTexture('vegetation', 32, 32)
+    treeTexture.destroy()
+
+    // Small 4-point spark, paired with the floating damage number below
+    // (see spawnDamageNumber) — same shape as the "hit" icon in Abordage's
+    // round log, gold to match the rest of the accent palette.
+    const sparkTexture = this.make.graphics({ x: 0, y: 0 })
+    sparkTexture.fillStyle(0xf0c96b, 1)
+    sparkTexture.fillPoints(
+      [
+        { x: 8, y: 0 }, { x: 9.6, y: 6.4 }, { x: 16, y: 8 }, { x: 9.6, y: 9.6 },
+        { x: 8, y: 16 }, { x: 6.4, y: 9.6 }, { x: 0, y: 8 }, { x: 6.4, y: 6.4 },
+      ],
+      true,
+    )
+    sparkTexture.generateTexture('damage-spark', 16, 16)
+    sparkTexture.destroy()
+
+    // Pill-shaped HP bars — Phaser's plain Rectangle game object can't do
+    // rounded corners, so the bg/fill are baked once as small rounded-rect
+    // textures (this used to be two flat Rectangle fills, just recolored,
+    // not actually redrawn as the pill shape the rest of the HUD uses).
+    // Rendered as Image + setCrop() rather than resizing a Rectangle each
+    // frame — crop is a cheap geometry op, no redraw, same cost as the old
+    // approach even with ~100 bots' bars updating every tick.
+    const hpBarBgTexture = this.make.graphics({ x: 0, y: 0 })
+    hpBarBgTexture.fillStyle(0x0b1a1f, 0.85)
+    hpBarBgTexture.fillRoundedRect(0, 0, HP_BAR_WIDTH, HP_BAR_HEIGHT, HP_BAR_HEIGHT / 2)
+    hpBarBgTexture.generateTexture('hp-bar-bg', HP_BAR_WIDTH, HP_BAR_HEIGHT)
+    hpBarBgTexture.destroy()
+    for (const [key, color] of Object.entries({ good: 0x4fae72, mid: 0xf0c96b, bad: 0xe2685e })) {
+      const fillTexture = this.make.graphics({ x: 0, y: 0 })
+      fillTexture.fillStyle(color, 1)
+      fillTexture.fillRoundedRect(0, 0, HP_BAR_WIDTH, HP_BAR_HEIGHT, HP_BAR_HEIGHT / 2)
+      fillTexture.generateTexture(`hp-bar-fill-${key}`, HP_BAR_WIDTH, HP_BAR_HEIGHT)
+      fillTexture.destroy()
+    }
+
     for (const port of this.ports) {
-      // An emoji glyph instead of a hand-drawn circle — the browser's own
-      // color font renders it, so it reads as a real building/harbor icon
-      // with zero extra assets to source.
-      const marker = this.add.text(port.x, port.y, '🏛️', { fontSize: '34px' }).setOrigin(0.5)
+      const marker = this.add.image(port.x, port.y, 'port-marker').setOrigin(0.5)
       marker.setDepth(2)
       this.add.text(port.x, port.y + 22, port.name, { fontSize: '12px', color: '#ffffff', stroke: '#0a1f28', strokeThickness: 3 }).setOrigin(0.5, 0).setDepth(2)
 
       // The real marker is only 36 world-units across — invisible at
       // minimap zoom. Same exaggerated-dot trick as the player marker,
       // main-camera-only-ignored so it doesn't show twice in the world.
-      const miniDot = this.add.circle(port.x, port.y, 130, 0xff6666).setStrokeStyle(30, 0x3a0f0f, 1).setDepth(999)
+      // Gold, not red — a port is a landmark, not a threat, and red is
+      // reserved for hostile HP-bar/fill states elsewhere in the HUD.
+      const miniDot = this.add.circle(port.x, port.y, 130, 0xd9a441).setStrokeStyle(30, 0x0b1a1f, 1).setDepth(999)
       this.cameras.main.ignore(miniDot)
     }
 
@@ -213,17 +384,32 @@ class WorldScene extends Phaser.Scene {
 
     for (const island of this.islandsData) {
       const gfx = this.add.graphics()
-      gfx.fillStyle(0xe0c98a, 1)
-      gfx.beginPath()
       const n = island.points.length
+      const rawPoints = []
       for (let i = 0; i < n; i++) {
         const angle = (i / n) * Math.PI * 2
         const r = island.points[i]
-        const px = island.x + Math.cos(angle) * r
-        const py = island.y + Math.sin(angle) * r
-        if (i === 0) gfx.moveTo(px, py)
-        else gfx.lineTo(px, py)
+        rawPoints.push({ x: island.x + Math.cos(angle) * r, y: island.y + Math.sin(angle) * r })
       }
+      // Smoothed purely for drawing (see smoothClosedPoints's own comment) —
+      // a darker wet-sand base plus a lighter dry-sand inset pulled toward
+      // the island's own center, the two-tone beach a flat single fill
+      // doesn't read as.
+      const shore = smoothClosedPoints(rawPoints)
+      gfx.fillStyle(0xc9ac70, 1)
+      gfx.beginPath()
+      shore.forEach((p, i) => (i === 0 ? gfx.moveTo(p.x, p.y) : gfx.lineTo(p.x, p.y)))
+      gfx.closePath()
+      gfx.fillPath()
+
+      gfx.fillStyle(0xe0c98a, 1)
+      gfx.beginPath()
+      shore.forEach((p, i) => {
+        const ix = island.x + (p.x - island.x) * 0.86
+        const iy = island.y + (p.y - island.y) * 0.86
+        if (i === 0) gfx.moveTo(ix, iy)
+        else gfx.lineTo(ix, iy)
+      })
       gfx.closePath()
       gfx.fillPath()
       gfx.setDepth(0)
@@ -232,9 +418,11 @@ class WorldScene extends Phaser.Scene {
       for (let i = 0; i < clumps; i++) {
         const angle = Math.random() * Math.PI * 2
         const dist = Math.random() * island.baseRadius * 0.55
+        // No random rotation — unlike the old symmetric blob, this texture
+        // has a real trunk fixed at the bottom, so spinning it scattered
+        // trunks in every direction instead of planting them in the ground.
         const leaf = this.add.sprite(island.x + Math.cos(angle) * dist, island.y + Math.sin(angle) * dist, 'vegetation')
         leaf.setScale(0.6 + Math.random() * 0.5)
-        leaf.setRotation(Math.random() * Math.PI * 2)
         leaf.setDepth(1)
       }
     }
@@ -262,6 +450,7 @@ class WorldScene extends Phaser.Scene {
       .text(this.ship.x, this.ship.y - 28, shipLabel(me?.firstName ?? 'Вы', me?.shipType ?? 'boat'), NAME_TEXT_STYLE)
       .setOrigin(0.5, 1)
       .setDepth(10)
+    this.myNameCard = this.createNameCard(this.myNameText)
     // Same live schema reference room.state.players.get() always returns —
     // its .hp mutates in place as server patches arrive, so reading it
     // fresh every frame (see update()) needs no separate 'hit'-message
@@ -281,6 +470,11 @@ class WorldScene extends Phaser.Scene {
     this.lastMoveSentAt = 0
     this.otherShips = new Map()
     this.activeCannonballs = new Map() // attackerId -> in-flight ball sprite
+    // Guards fireBroadside below — mashing fire mid-reload used to still
+    // reset the HUD ring's animation (via onFireBroadside) even though no
+    // ball actually flew, since the server silently drops the early 'fire'
+    // but the client had no idea it was early and reset anyway.
+    this.lastBroadsideFiredAt = { fireLeft: 0, fireRight: 0 }
 
     this.setupNetworking()
 
@@ -296,16 +490,16 @@ class WorldScene extends Phaser.Scene {
     // 'right' and the screen-right one (mouse right button) sends 'left'.
     this.input.mouse?.disableContextMenu()
     this.input.on('pointerdown', (pointer) => {
-      if (pointer.leftButtonDown()) this.room.send('fire', { side: 'right' })
-      else if (pointer.rightButtonDown()) this.room.send('fire', { side: 'left' })
+      if (pointer.leftButtonDown()) this.fireBroadside('fireLeft')
+      else if (pointer.rightButtonDown()) this.fireBroadside('fireRight')
     })
 
     // Rebindable keyboard/gamepad actions (see services/controls.js) — the
     // same fireLeft/fireRight/action/inventory actions work from either
     // device, whatever the player has bound them to.
     this.controlUnsubs = [
-      controls.onPress('fireLeft', () => this.room.send('fire', { side: 'right' })),
-      controls.onPress('fireRight', () => this.room.send('fire', { side: 'left' })),
+      controls.onPress('fireLeft', () => this.fireBroadside('fireLeft')),
+      controls.onPress('fireRight', () => this.fireBroadside('fireRight')),
       controls.onPress('action', () => this.onActionPress?.()),
       controls.onPress('inventory', () => this.onInventoryPress?.()),
       // Circle/B on a gamepad, Escape on keyboard — same universal "back"
@@ -356,7 +550,8 @@ class WorldScene extends Phaser.Scene {
         .text(player.x, player.y - 28, shipLabel(player.firstName, player.shipType), { ...NAME_TEXT_STYLE, color: nameColor(player) })
         .setOrigin(0.5, 1)
         .setDepth(10) // above ship art — with ~100 bots on screen, overlapping hulls shouldn't make a name look detached from its own ship
-      this.minimapCam.ignore(sprite.nameText)
+      sprite.nameCard = this.createNameCard(sprite.nameText)
+      this.minimapCam.ignore([sprite.nameText, sprite.nameCard])
       // Same live schema object the position/rotation lerp target below
       // reads from — .hp/.maxHp mutate in place as server patches land, no
       // separate tracking needed.
@@ -375,6 +570,7 @@ class WorldScene extends Phaser.Scene {
     $(this.room.state).players.onRemove((player, sessionId) => {
       const sprite = this.otherShips.get(sessionId)
       sprite?.nameText.destroy()
+      sprite?.nameCard.destroy()
       sprite?.hpBar.bg.destroy()
       sprite?.hpBar.fill.destroy()
       sprite?.destroy()
@@ -383,18 +579,17 @@ class WorldScene extends Phaser.Scene {
 
     this.room.onMessage('fired', ({ attackerId, side }) => this.spawnCannonball(attackerId, side))
 
-    this.room.onMessage('hit', ({ attackerId, targetId, hp }) => {
+    this.room.onMessage('hit', ({ attackerId, targetId, damage, hp }) => {
       this.stopCannonball(attackerId) // found its mark — don't let the visual keep flying past it
       if (targetId === mySessionId) {
         this.hpText.setText(`HP: ${hp}/${this.myMaxHp}`)
-        this.cameras.main.flash(150, 200, 40, 40)
+        this.spawnDamageNumber(this.ship.x, this.ship.y, damage)
       } else {
-        // A brief full-color flash reads clearly as "just got hit" since
-        // the hull carries no tint of its own otherwise (hostility is
-        // shown by the name label's color only — see nameColor above).
+        // The floating "-NN" (see spawnDamageNumber) is the "just got hit"
+        // signal now — a red screen flash / hull tint on top of it read as
+        // redundant, per direct feedback.
         const targetSprite = this.otherShips.get(targetId)
-        targetSprite?.setTintFill(0xff6666)
-        this.time.delayedCall(150, () => targetSprite?.active && targetSprite.clearTint())
+        if (targetSprite) this.spawnDamageNumber(targetSprite.x, targetSprite.y, damage)
       }
     })
 
@@ -478,6 +673,30 @@ class WorldScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Floating "-NN" over a ship that just got hit — a spark plus a number
+   * that rises and fades, same tween shape as the '+amount золота' bounty
+   * toast a bit further up, just angrier-colored and a size bigger so it
+   * still reads clearly mid-fight with cannonballs and other ships around.
+   */
+  spawnDamageNumber(x, y, damage) {
+    const spark = this.add.image(x - 16, y - 34, 'damage-spark').setDepth(20)
+    const toast = this.add
+      .text(x - 2, y - 34, `−${damage}`, { fontSize: '20px', fontStyle: 'bold', color: '#ff9d94', stroke: '#2c1210', strokeThickness: 3 })
+      .setOrigin(0, 0.5)
+      .setDepth(20)
+    this.tweens.add({
+      targets: [spark, toast],
+      y: '-=34',
+      alpha: 0,
+      duration: 900,
+      onComplete: () => {
+        spark.destroy()
+        toast.destroy()
+      },
+    })
+  }
+
   update(time) {
     // controls.js now drives its own gamepad-polling loop internally (see
     // its constructor) — this used to be the only place that called
@@ -529,12 +748,14 @@ class WorldScene extends Phaser.Scene {
       const diff = Math.atan2(Math.sin(sprite.targetRotation - sprite.rotation), Math.cos(sprite.targetRotation - sprite.rotation))
       sprite.rotation += diff * OTHER_SHIP_LERP
       sprite.nameText.setPosition(sprite.x, sprite.y - 28)
+      sprite.nameCard.setPosition(sprite.x, sprite.y + sprite.nameCard.yOffset)
       this.updateHpBar(sprite.hpBar, sprite.x, sprite.y, sprite.playerRef.hp, sprite.playerRef.maxHp)
     }
 
     this.coordText.setText(`X: ${Math.round(this.ship.x)}  Y: ${Math.round(this.ship.y)}`)
     this.minimapPlayerDot.setPosition(this.ship.x, this.ship.y)
     this.myNameText.setPosition(this.ship.x, this.ship.y - 28)
+    this.myNameCard.setPosition(this.ship.x, this.ship.y + this.myNameCard.yOffset)
     this.updateHpBar(this.myHpBar, this.ship.x, this.ship.y, this.meRef?.hp ?? this.myMaxHp, this.myMaxHp)
 
     this.checkNearPort()
@@ -579,17 +800,36 @@ class WorldScene extends Phaser.Scene {
     return { size, x: this.scale.width - size - MINIMAP_MARGIN, y: MINIMAP_MARGIN }
   }
 
+  // Redraws the rounded backing/border in place (both setup and every
+  // resize need this exact shape at a new x/y/size — see repositionMinimap).
+  drawMinimapFrame(x, y, size) {
+    const frame = this.minimapFrame
+    frame.clear()
+    frame.fillStyle(0x0b1a1f, 0.85)
+    frame.fillRoundedRect(x - 2, y - 2, size + 4, size + 4, 12)
+    frame.lineStyle(2, 0xd9a441, 0.55)
+    frame.strokeRoundedRect(x - 2, y - 2, size + 4, size + 4, 12)
+  }
+
   setupMinimap() {
     const { size, x, y } = this.minimapLayout()
 
-    const frame = this.add.rectangle(x - 2, y - 2, size + 4, size + 4, 0x0a1f28, 0.85).setOrigin(0).setScrollFactor(0)
-    frame.setStrokeStyle(2, 0xbcd9d1, 0.6)
-    this.minimapFrame = frame
+    this.minimapFrame = this.add.graphics().setScrollFactor(0)
+    this.drawMinimapFrame(x, y, size)
+
+    // Rounds the map content itself to match the frame — a geometry mask
+    // built from an un-added Graphics shape (this.make, not this.add, so it
+    // never renders on its own), redrawn alongside the frame on every
+    // resize (see repositionMinimap).
+    this.minimapMaskShape = this.make.graphics({ x: 0, y: 0 })
+    this.minimapMaskShape.fillStyle(0xffffff)
+    this.minimapMaskShape.fillRoundedRect(x, y, size, size, 10)
 
     this.minimapCam = this.cameras.add(x, y, size, size)
     this.minimapCam.setZoom(size / MAP_SIZE)
     this.minimapCam.setBounds(0, 0, MAP_SIZE, MAP_SIZE)
-    this.minimapCam.setBackgroundColor('#0e3b4d')
+    this.minimapCam.setBackgroundColor('#123039')
+    this.minimapCam.setMask(this.minimapMaskShape.createGeometryMask())
 
     // A dedicated bright marker — the real ship sprite is only a few
     // world-units across and disappears at minimap zoom otherwise, and with
@@ -597,8 +837,8 @@ class WorldScene extends Phaser.Scene {
     // outlined dot on top of everything else is the only way to actually
     // spot yourself. Only meant for the minimap, so the main camera must
     // ignore it — otherwise it renders as a giant circle over the real ship.
-    // Cyan — deliberately far from the orange/red bot and port palette so it
-    // never gets mistaken for a hostile or a city marker at a glance.
+    // Cyan — deliberately far from the gold port markers and the red HP-bar
+    // danger state so it never gets mistaken for either at a glance.
     this.minimapPlayerDot = this.add.circle(this.ship.x, this.ship.y, 160, 0x4ce0ff).setStrokeStyle(40, 0x0a3540, 1).setDepth(1000)
     // Only meant for the minimap — the main camera must ignore it, or it
     // renders as a giant circle over the real ship. It must NOT also be in
@@ -606,18 +846,34 @@ class WorldScene extends Phaser.Scene {
     // hidden from both cameras, same mistake the frame had earlier).
     this.cameras.main.ignore(this.minimapPlayerDot)
 
-    // The frame is a screen-fixed HUD element for the main camera only — the
-    // minimap camera must ignore it, or it'd draw as a giant rectangle over
-    // the whole minimap.
-    this.minimapCam.ignore([frame, this.hpText, this.coordText, this.myNameText, this.myHpBar.bg, this.myHpBar.fill])
+    // A small fixed compass rose in the corner — same gold as the port
+    // markers and the frame's own border, generated once like they are.
+    const compassTexture = this.make.graphics({ x: 0, y: 0 })
+    compassTexture.lineStyle(1.4, 0xd9a441, 1)
+    compassTexture.strokeCircle(9, 9, 7.5)
+    compassTexture.fillStyle(0xd9a441, 1)
+    compassTexture.fillPoints([{ x: 9, y: 2 }, { x: 11.5, y: 9 }, { x: 9, y: 16 }, { x: 6.5, y: 9 }], true)
+    compassTexture.generateTexture('minimap-compass', 18, 18)
+    compassTexture.destroy()
+    this.minimapCompass = this.add.image(x + 12, y + 12, 'minimap-compass').setOrigin(0.5).setScrollFactor(0).setAlpha(0.9)
+
+    // The frame/compass are screen-fixed HUD elements for the main camera
+    // only, and the water tile is purely a main-view backdrop (at minimap
+    // zoom its wave lines would just alias into noise) — the minimap camera
+    // must ignore all of them, or the frame/compass draw as giant shapes
+    // over the whole minimap and the water washes out its own flat tone.
+    this.minimapCam.ignore([this.minimapFrame, this.minimapCompass, this.waterTile, this.hpText, this.coordText, this.myNameText, this.myNameCard, this.myHpBar.bg, this.myHpBar.fill])
   }
 
   /** Re-lays out the minimap after the canvas itself has resized (see handleResize) — otherwise it stays pinned to its create()-time corner and size while the rest of the HUD moves. */
   repositionMinimap() {
     if (!this.minimapCam) return
     const { size, x, y } = this.minimapLayout()
-    this.minimapFrame.setPosition(x - 2, y - 2)
-    this.minimapFrame.setSize(size + 4, size + 4)
+    this.drawMinimapFrame(x, y, size)
+    this.minimapMaskShape.clear()
+    this.minimapMaskShape.fillStyle(0xffffff)
+    this.minimapMaskShape.fillRoundedRect(x, y, size, size, 10)
+    this.minimapCompass.setPosition(x + 12, y + 12)
     this.minimapCam.setViewport(x, y, size, size)
     this.minimapCam.setZoom(size / MAP_SIZE)
   }
@@ -634,6 +890,50 @@ class WorldScene extends Phaser.Scene {
     this.repositionMinimap()
   }
 
+  // 'left'/'right' here are screen-relative UI labels ('fireLeft'/'fireRight',
+  // matching the touch buttons and the rebindable action names) — the
+  // server's internal 'side' vector is inverted from that (see the note on
+  // the mouse pointerdown handler above), translated right here so nothing
+  // downstream needs to know about that inversion.
+  //
+  // Guarded by our own predicted cooldown (lastBroadsideFiredAt, set up in
+  // create()) before sending anything — without this, mashing fire mid-reload
+  // still sent 'fire' (which the server just silently drops) AND still called
+  // onFireBroadside, which reset the HUD ring's animation to "just fired"
+  // even though nothing actually did. The ring restarting with no shot to
+  // show for it was the desync.
+  fireBroadside(uiSide) {
+    const now = Date.now()
+    if (now - this.lastBroadsideFiredAt[uiSide] < FIRE_COOLDOWN_MS) return
+    this.lastBroadsideFiredAt[uiSide] = now
+    this.room.send('fire', { side: uiSide === 'fireLeft' ? 'right' : 'left' })
+    this.onFireBroadside?.(uiSide)
+  }
+
+  /**
+   * Dark rounded card behind a ship's name + HP bar, drawn in LOCAL space
+   * around (0,0) — position it like any other game object with
+   * setPosition(shipX, shipY + card.yOffset) (yOffset is stashed on the
+   * returned object since it depends on this particular name's text
+   * height). Width fits the actual name (names vary a lot in length); the
+   * rest of the geometry is fixed, since every name renders at the same
+   * NAME_TEXT_STYLE font size regardless of what it says.
+   */
+  createNameCard(nameText) {
+    const padX = 10
+    const padTop = 3
+    const padBottom = 4
+    const width = Math.max(nameText.width, HP_BAR_WIDTH) + padX * 2
+    const top = -28 - nameText.height - padTop
+    const bottom = -21 + HP_BAR_HEIGHT / 2 + padBottom
+    const height = bottom - top
+    const card = this.add.graphics().setDepth(9) // behind the name (10) and hp bar (10/11) it backs
+    card.fillStyle(0x06141a, 0.68)
+    card.fillRoundedRect(-width / 2, -height / 2, width, height, 7)
+    card.yOffset = (top + bottom) / 2
+    return card
+  }
+
   /**
    * A dark backing rect plus a colored fill rect, both left-anchored
    * (origin 0, 0.5) so the fill shrinks from the right as HP drops instead
@@ -643,9 +943,9 @@ class WorldScene extends Phaser.Scene {
    * updateHpBar).
    */
   createHpBar(x, y) {
-    const bg = this.add.rectangle(x, y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x0a1f28, 0.85).setOrigin(0, 0.5).setDepth(10)
-    bg.setStrokeStyle(1, 0x000000, 0.4)
-    const fill = this.add.rectangle(x, y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x6fd98a, 1).setOrigin(0, 0.5).setDepth(11)
+    const bg = this.add.image(x, y, 'hp-bar-bg').setOrigin(0, 0.5).setDepth(10)
+    const fill = this.add.image(x, y, 'hp-bar-fill-good').setOrigin(0, 0.5).setDepth(11)
+    fill.setCrop(0, 0, HP_BAR_WIDTH, HP_BAR_HEIGHT)
     return { bg, fill }
   }
 
@@ -656,11 +956,14 @@ class WorldScene extends Phaser.Scene {
     bar.fill.setPosition(barX, barY)
 
     const fraction = maxHp > 0 ? Phaser.Math.Clamp(hp / maxHp, 0, 1) : 0
-    bar.fill.setSize(HP_BAR_WIDTH * fraction, HP_BAR_HEIGHT)
     // Green/amber/red at a glance — matches the same thresholds as the
     // HP number itself would read at, no need to also read the digits to
-    // tell "fine" from "about to sink" from across the map.
-    bar.fill.setFillStyle(fraction > 0.5 ? 0x6fd98a : fraction > 0.25 ? 0xffd166 : 0xe05a5a, 1)
+    // tell "fine" from "about to sink" from across the map. A texture swap
+    // (not a tint) so the rounded-pill fill stays crisp at every color —
+    // only actually swaps when the threshold's crossed, not every frame.
+    const fillKey = fraction > 0.5 ? 'hp-bar-fill-good' : fraction > 0.25 ? 'hp-bar-fill-mid' : 'hp-bar-fill-bad'
+    if (bar.fill.texture.key !== fillKey) bar.fill.setTexture(fillKey)
+    bar.fill.setCrop(0, 0, HP_BAR_WIDTH * fraction, HP_BAR_HEIGHT)
   }
 
   checkNearPort() {
@@ -811,6 +1114,7 @@ onMounted(async () => {
     onActionPress: performAction,
     onInventoryPress: toggleInfo,
     onBackPress: () => router.push('/'),
+    onFireBroadside: noteBroadsideFired,
   })
 })
 
@@ -818,6 +1122,7 @@ onBeforeUnmount(() => {
   stopGamepadWatch?.()
   room?.leave()
   game?.destroy(true)
+  if (cooldownRaf) cancelAnimationFrame(cooldownRaf)
 })
 </script>
 
@@ -833,9 +1138,10 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 8px 16px;
   border-radius: 999px;
-  background: rgba(10, 20, 25, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: #fff;
+  background: rgba(6, 20, 24, 0.85);
+  border: 1px solid var(--c-border);
+  color: var(--c-ink);
+  font-family: var(--font-body);
   font-size: 13px;
   font-weight: 700;
   white-space: nowrap;
@@ -846,12 +1152,49 @@ onBeforeUnmount(() => {
 }
 .context-prompt__hint {
   flex: none;
-  color: #6fd98a;
+  color: var(--c-gold-bright);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
+
+/* Broadside готовность/перезарядка — всегда на экране (не только тач):
+   геймпад/клавиатурный игрок так же не видел раньше, готов ли борт стрелять.
+   Кольцо красит сам conic-gradient в inline style (см. broadsideRingStyle),
+   тут только форма и подложка под иконку. */
+.broadside-hud {
+  position: absolute;
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  gap: 10px;
+  z-index: 15;
+}
+.broadside-ring {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.broadside-ring__inner {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgba(6, 20, 24, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.broadside-ring__inner svg { width: 22px; height: 22px; }
 
 /*
  * The wrapper spans the whole page but stays click-through (pointer-events:
@@ -872,26 +1215,19 @@ onBeforeUnmount(() => {
   bottom: calc(20px + env(safe-area-inset-bottom, 0px));
   pointer-events: auto;
 }
-.touch-controls__buttons {
-  position: absolute;
-  right: calc(16px + env(safe-area-inset-right, 0px));
-  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 10px;
-}
-.touch-controls__row {
-  display: flex;
-  gap: 10px;
-}
 .touch-btn {
   pointer-events: auto;
-  width: 66px;
-  height: 66px;
+  position: absolute;
+  /* Sits directly above the right-hand broadside ring — both anchored off
+     the same right edge, so this stays aligned to it at any screen size. */
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px) + 76px);
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
-  color: #fff;
-  font-size: 11px;
+  color: var(--c-ink);
+  font-family: var(--font-body);
+  font-size: 10.5px;
   font-weight: 700;
   line-height: 1.15;
   text-align: center;
@@ -899,14 +1235,8 @@ onBeforeUnmount(() => {
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
-}
-.touch-btn--fire {
-  border: 2px solid rgba(224, 90, 90, 0.7);
-  background: rgba(175, 61, 61, 0.55);
-}
-.touch-btn--action {
-  border: 2px solid rgba(111, 217, 138, 0.75);
-  background: rgba(47, 125, 79, 0.6);
+  border: 1px solid rgba(217, 164, 65, 0.4);
+  background: rgba(6, 20, 24, 0.6);
 }
 
 /*
@@ -926,7 +1256,7 @@ onBeforeUnmount(() => {
  */
 .world-page {
   padding: 0;
-  background: #0a1f28;
+  background: var(--c-bg-deep);
 }
 .world-frame {
   position: absolute;

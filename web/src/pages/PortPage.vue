@@ -12,13 +12,20 @@
       -->
       <div class="sheet__top">
         <div class="port-hero">
-          <button class="leave-btn" @click="$router.push('/world')">← Уплыть</button>
+          <button class="leave-btn" @click="$router.push('/world')">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15,4 7,12 15,20"/></svg>
+            Уплыть
+          </button>
           <div class="port-hero__title">{{ port.name }}</div>
-          <div class="port-hero__gold">Золото: {{ ship?.coins ?? coins }}</div>
+          <div class="port-hero__gold">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/></svg>
+            {{ ship?.coins ?? coins }}
+          </div>
         </div>
 
         <div class="tabs">
           <button v-for="t in tabs" :key="t.key" class="tab-btn" :class="{ active: tab === t.key }" @click="tab = t.key">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" v-html="t.icon"></svg>
             {{ t.label }}
           </button>
         </div>
@@ -31,6 +38,7 @@
         <div v-if="tab === 'market'" class="panel">
           <div class="row__sub">Количество: ◀ ▶ (или A/D) на выбранном поле</div>
           <div v-for="p in market" :key="p.type" class="row">
+            <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" v-html="productIcon(p.type)"></svg></div>
             <div class="row__main">
               <div class="row__title">{{ p.name }}</div>
               <div class="row__sub">{{ p.price }} зол · в наличии {{ p.stock }} · у меня {{ owned(p.type) }}</div>
@@ -52,6 +60,7 @@
         <!-- Верфь -->
         <div v-if="tab === 'shipyard'" class="panel">
           <div v-for="s in shipyard" :key="s.type" class="row">
+            <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="3,10 9,4 13,8 7,14"/><line x1="6" y1="13" x2="12" y2="21"/></svg></div>
             <div class="row__main">
               <div class="row__title">{{ s.name }} {{ s.type === ship?.type ? '(текущий)' : '' }}</div>
               <div class="row__sub">{{ s.price }} зол · HP {{ s.max_hp }} · пушек {{ s.cannon_count }} · экипаж до {{ s.max_sailors }}</div>
@@ -63,6 +72,7 @@
         <!-- Таверна -->
         <div v-if="tab === 'tavern'" class="panel">
           <div v-for="s in tavern" :key="s.type" class="row">
+            <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="10" height="11" rx="1"/><path d="M15 10 h3 a3 3 0 0 1 0 6 h-3"/></svg></div>
             <div class="row__main">
               <div class="row__title">{{ s.name }}</div>
               <div class="row__sub">{{ s.price }} зол · на борту {{ ship?.sailors?.[s.type] ?? 0 }}</div>
@@ -144,11 +154,29 @@ const missingHp = computed(() => Math.max(0, (ship.value?.max_hp ?? 0) - (ship.v
 const maxAffordableRepair = computed(() => Math.min(missingHp.value, Math.floor(coins.value / repairPricePerHp.value)))
 
 const tabs = [
-  { key: 'market', label: 'Рынок' },
-  { key: 'shipyard', label: 'Верфь' },
-  { key: 'tavern', label: 'Таверна' },
-  { key: 'repair', label: 'Мастерская' },
+  { key: 'market', label: 'Рынок', icon: '<rect x="4" y="7" width="16" height="13" rx="1"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="12" y1="7" x2="12" y2="20"/>' },
+  { key: 'shipyard', label: 'Верфь', icon: '<polygon points="3,10 9,4 13,8 7,14"/><line x1="6" y1="13" x2="12" y2="21"/>' },
+  { key: 'tavern', label: 'Таверна', icon: '<rect x="5" y="8" width="10" height="11" rx="1"/><path d="M15 10 h3 a3 3 0 0 1 0 6 h-3"/>' },
+  { key: 'repair', label: 'Мастерская', icon: '<path d="M8.5 6.5a3 3 0 1 0 4.24 4.24"/><line x1="11.5" y1="9.5" x2="18" y2="16"/><path d="M16 14l3.5 3.5a2 2 0 1 1-2.83 2.83L13 17"/>' },
 ]
+
+// Товары рынка (см. api/config/products.php) — по одной узнаваемой пиктограмме
+// на тип, вместо голого текста в списке. default — трюмный ящик для любого
+// типа, которого тут нет (на случай, если конфиг продуктов пополнят).
+const PRODUCT_ICONS = {
+  rum: '<rect x="10" y="2" width="4" height="5"/><path d="M8 9 L10 6 H14 L16 9 V19 a2 2 0 0 1-2 2 H10 a2 2 0 0 1-2-2 Z"/>',
+  silk: '<rect x="4" y="9" width="16" height="10" rx="2"/><path d="M4 9 Q8 5 12 9 T20 9"/>',
+  water: '<path d="M12 3 C12 3 6 11 6 15.5 A6 6 0 0 0 18 15.5 C18 11 12 3 12 3 Z"/>',
+  food: '<path d="M3 12 C6 7 14 7 17 12 C14 17 6 17 3 12 Z"/><path d="M17 12 L21 9 V15 Z"/>',
+  leather: '<path d="M8 9 C8 6 10 4 12 4 C14 4 16 6 16 9"/><path d="M6 9 H18 L17 20 a2 2 0 0 1-2 2 H9 a2 2 0 0 1-2-2 Z"/>',
+  wood: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/>',
+  tobacco: '<path d="M4 20 C4 10 10 4 20 4 C20 14 14 20 4 20 Z"/><path d="M6 18 L18 6"/>',
+  coffee: '<path d="M5 9 h11 v6 a5 5 0 0 1-5 5 H10 a5 5 0 0 1-5-5 Z"/><path d="M16 10 h2 a3 3 0 0 1 0 6 h-2"/><path d="M9 5 q1-2 0-4"/><path d="M13 5 q1-2 0-4"/>',
+  default: '<rect x="4" y="7" width="16" height="13" rx="1"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="12" y1="7" x2="12" y2="20"/>',
+}
+function productIcon(type) {
+  return PRODUCT_ICONS[type] ?? PRODUCT_ICONS.default
+}
 
 async function load() {
   const [portData, shipData] = await Promise.all([api.getPort(portId), api.getShip()])
@@ -300,26 +328,27 @@ watch(repairAmount, () => nextTick(refreshItems))
 <style scoped>
 .port-page {
   min-height: 100vh;
-  background: linear-gradient(180deg, #1a2c32 0%, #142127 100%);
+  background: radial-gradient(140% 70% at 50% -10%, var(--c-bg-mid) 0%, var(--c-bg-deep) 60%), var(--c-bg-deep);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 16px;
   box-sizing: border-box;
 }
-.text-center.q-mt-xl { color: #9fc2ba; }
+.text-center.q-mt-xl { color: var(--c-ink-soft); }
 
 .sheet {
   width: min(480px, 100%);
   max-height: 90vh;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, #1a2c32 0%, #142127 100%);
-  border: 1px solid #2c4046;
+  background: var(--c-bg-deep);
+  border: 1px solid var(--c-border);
   border-radius: 16px;
-  padding: 22px 20px;
-  color: #eef5f3;
+  padding: 18px 18px 0;
+  color: var(--c-ink);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
 }
 .sheet__top { flex: none; }
 .sheet__scroll {
@@ -330,47 +359,66 @@ watch(repairAmount, () => nextTick(refreshItems))
      easy to miss and silently breaks the whole point of splitting it out. */
   min-height: 0;
   overflow-y: auto;
+  /* Пергамент как «прилавок»: рынок/верфь/таверна/ремонт читаются как
+     конторская книга, в отличие от тёмного каркаса вокруг них. */
+  background: var(--c-parchment);
+  border-radius: 16px 16px 0 0;
+  margin-top: 12px;
+  padding: 16px 4px 20px;
+  box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.3);
 }
 
-.port-hero { position: relative; text-align: center; margin-bottom: 18px; }
-.port-hero__title { font-size: 22px; font-weight: 800; }
-.port-hero__gold { font-size: 14px; font-weight: 700; color: #ffd166; margin-top: 4px; }
+.port-hero { position: relative; text-align: center; margin-bottom: 16px; padding-top: 2px; }
+.port-hero__title { font-family: var(--font-display); font-size: 22px; letter-spacing: 0.01em; }
+.port-hero__gold {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  font-size: 14px; font-weight: 700; color: var(--c-gold-bright); margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
 
-.tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+.tabs { display: flex; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
 .tab-btn {
   flex: 1;
-  padding: 9px 4px;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 9px 4px 8px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.05);
-  color: #eef5f3;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-ink-soft);
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 11.5px;
+  font-weight: 700;
 }
-.tab-btn.active { background: linear-gradient(135deg, #2f7d4f, #256640); border-color: transparent; color: #fff; }
+.tab-btn svg { width: 19px; height: 19px; }
+.tab-btn.active { background: rgba(217, 164, 65, 0.14); border-color: rgba(217, 164, 65, 0.4); color: var(--c-gold-bright); }
 
-.error-text { color: #ff8080; font-size: 13px; margin-bottom: 8px; }
+.error-text { color: var(--c-danger); font-size: 13px; margin: 8px 0 0; }
 
-.panel { display: flex; flex-direction: column; gap: 8px; }
+.panel { display: flex; flex-direction: column; gap: 2px; padding: 0 12px; }
+.panel > .row__sub { color: var(--c-parchment-ink-soft); margin-bottom: 4px; }
 .row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
+  gap: 12px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--c-parchment-border);
 }
+.row__icon {
+  flex: none; width: 34px; height: 34px; border-radius: 8px;
+  background: rgba(44, 35, 20, 0.06);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--c-parchment-ink-soft);
+}
+.row__icon svg { width: 18px; height: 18px; }
 .row__main { flex: 1; min-width: 0; }
-.row__title { font-weight: 700; font-size: 14px; }
-.row__sub { font-size: 12px; color: #9fc2ba; }
+.row__title { font-weight: 700; font-size: 14px; color: var(--c-parchment-ink); }
+.row__sub { font-size: 12px; color: var(--c-parchment-ink-soft); }
 
 .qty-input {
-  width: 52px; padding: 7px; border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.06);
-  color: #eef5f3;
+  width: 48px; padding: 7px; border-radius: 8px;
+  border: 1px solid var(--c-parchment-border);
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--c-parchment-ink);
   text-align: center;
   /* Number input spinner — ◀ ▶ / A/D already do this job. */
   -moz-appearance: textfield;
@@ -382,32 +430,35 @@ watch(repairAmount, () => nextTick(refreshItems))
   margin: 0;
 }
 
+/* Купить — фирменное золото (главное действие ряда); Продать — на порядок
+   тише, обводка вместо заливки, чтобы их нельзя было спутать взглядом. */
 .mini-btn {
   padding: 7px 12px;
   border-radius: 8px;
   border: none;
-  background: linear-gradient(135deg, #2f7d4f, #256640);
-  color: #fff;
+  background: linear-gradient(135deg, var(--c-gold-bright), var(--c-gold));
+  color: #2c1c05;
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
 }
 .mini-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .mini-btn--flat {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #eef5f3;
+  background: transparent;
+  border: 1px solid var(--c-parchment-border);
+  color: var(--c-parchment-ink-soft);
 }
 
 .leave-btn {
   position: absolute;
   left: 0;
   top: 0;
+  display: flex; align-items: center; gap: 6px;
   padding: 6px 10px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.05);
-  color: #eef5f3;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-ink);
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
@@ -419,7 +470,7 @@ watch(repairAmount, () => nextTick(refreshItems))
    consistently treat that as "should show the ring" the way a real
    keydown does, so :focus-visible could silently disappear on a gamepad. */
 .port-page :focus {
-  outline: 3px solid #6fd98a;
+  outline: 3px solid var(--c-gold-bright);
   outline-offset: 2px;
 }
 </style>

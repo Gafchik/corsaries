@@ -1,45 +1,38 @@
 /* app global css */
 
+/* Shared nautical palette + type pair — dark water + brass/gold as the one
+   accent, parchment reserved for trading screens (Port). Yeseva One /
+   PT Sans are loaded in index.html (both carry full Cyrillic). */
 :root {
-  --ba-bg: #F3F4F8;
-  --ba-surface: #FFFFFF;
-  --ba-surface-2: #F8F9FC;
-  --ba-border: #E4E7EF;
-  --ba-ink: #1B2036;
-  --ba-ink-soft: #6B7086;
-  --ba-you: #2D5BEB;
-  --ba-you-soft: #EAF0FF;
-  --ba-opp: #E5484D;
-  --ba-opp-soft: #FDEBEC;
-  --ba-block: #F5A623;
-  --ba-block-soft: #FFF4E0;
-  --ba-win: #23B26D;
-  --ba-radius: 16px;
-  --ba-radius-sm: 10px;
+  --c-bg-deep: #0b1a1f;
+  --c-bg-mid: #123039;
+  --c-surface: rgba(255, 255, 255, 0.05);
+  --c-surface-hover: rgba(255, 255, 255, 0.09);
+  --c-border: rgba(255, 255, 255, 0.10);
+  --c-ink: #eef5f2;
+  --c-ink-soft: #9fc7bd;
+  --c-ink-faint: #6a8b85;
+  --c-gold: #d9a441;
+  --c-gold-bright: #f0c96b;
+  --c-danger: #e2685e;
+  --c-success: #4fae72;
+  --c-parchment: #ece0c7;
+  --c-parchment-ink: #2c2314;
+  --c-parchment-ink-soft: #7a6a45;
+  --c-parchment-border: #cbb884;
+  --font-display: 'Yeseva One', Georgia, 'Times New Roman', serif;
+  --font-body: 'PT Sans', -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
 /* Telegram's WebView paints its own (often dark) background behind the page.
    Without an explicit opaque background here, that shows through anywhere
    our own components don't set their own background, breaking text contrast. */
 html, body, #q-app {
-  background: var(--ba-bg);
-  color: var(--ba-ink);
+  background: var(--c-bg-deep);
+  color: var(--c-ink);
+  font-family: var(--font-body);
 }
 
 body {
   -webkit-tap-highlight-color: transparent;
-}
-
-.ba-card {
-  background: var(--ba-surface);
-  border: 1px solid var(--ba-border);
-  border-radius: var(--ba-radius);
-}
-
-.ba-eyebrow {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ba-ink-soft);
 }

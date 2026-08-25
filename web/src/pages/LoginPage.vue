@@ -1,7 +1,9 @@
 <template>
   <div class="login-page column items-center justify-center q-pa-lg">
     <div class="login-hero">
-      <div class="login-hero__emoji">🏴‍☠️</div>
+      <div class="login-hero__badge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><line x1="16" y1="12" x2="21" y2="12"/><line x1="14.83" y1="14.83" x2="18.36" y2="18.36"/><line x1="12" y1="16" x2="12" y2="21"/><line x1="9.17" y1="14.83" x2="5.64" y2="18.36"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="9.17" y1="9.17" x2="5.64" y2="5.64"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="14.83" y1="9.17" x2="18.36" y2="5.64"/></svg>
+      </div>
       <div class="login-hero__title">Corsaries</div>
       <div class="login-hero__subtitle">{{ mode === 'login' ? 'Вход' : 'Регистрация' }}</div>
     </div>
@@ -84,41 +86,48 @@ onMounted(() => {
 .login-page {
   min-height: 100vh;
   box-sizing: border-box;
-  background: linear-gradient(180deg, #1a2c32 0%, #142127 100%);
-  color: #eef5f3;
+  background: radial-gradient(140% 70% at 50% -10%, var(--c-bg-mid) 0%, var(--c-bg-deep) 60%), var(--c-bg-deep);
+  color: var(--c-ink);
 }
-.login-hero { text-align: center; margin-bottom: 28px; }
-.login-hero__emoji { font-size: 52px; line-height: 1; margin-bottom: 10px; }
-.login-hero__title { font-size: 26px; font-weight: 800; letter-spacing: 0.01em; }
-.login-hero__subtitle { font-size: 13px; color: #9fc2ba; margin-top: 4px; }
+.login-hero { text-align: center; margin-bottom: 28px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.login-hero__badge {
+  width: 64px; height: 64px; border-radius: 50%;
+  border: 1px solid var(--c-border);
+  background: rgba(217, 164, 65, 0.08);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--c-gold-bright);
+}
+.login-hero__badge svg { width: 34px; height: 34px; }
+.login-hero__title { font-family: var(--font-display); font-size: 30px; letter-spacing: 0.01em; }
+.login-hero__subtitle { font-size: 13px; color: var(--c-ink-soft); }
 
 .login-form { width: 100%; max-width: 320px; display: flex; flex-direction: column; gap: 10px; }
 .login-input {
   width: 100%;
   padding: 12px 14px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.06);
-  color: #eef5f3;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-ink);
   font-size: 15px;
   box-sizing: border-box;
 }
-.login-input::placeholder { color: #6f8b85; }
-.login-input:focus { outline: 2px solid #6fd98a; outline-offset: 1px; }
-.login-error { color: #ff8080; font-size: 13px; margin: 0; }
+.login-input::placeholder { color: var(--c-ink-faint); }
+.login-input:focus { outline: 2px solid var(--c-gold-bright); outline-offset: 1px; }
+.login-error { color: var(--c-danger); font-size: 13px; margin: 0; }
 
 .login-btn {
   width: 100%;
   max-width: 320px;
   padding: 12px 16px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.05);
-  color: #eef5f3;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-ink);
   cursor: pointer;
   font-weight: 700;
   margin-top: 6px;
 }
-.login-btn--primary { background: linear-gradient(135deg, #2f7d4f, #256640); color: #fff; border-color: transparent; }
-.login-btn--flat { border-color: transparent; background: transparent; font-weight: 500; color: #9fc2ba; }
+.login-btn--primary { background: linear-gradient(135deg, var(--c-gold-bright), var(--c-gold)); color: #2c1c05; border-color: transparent; }
+.login-btn--flat { border-color: transparent; background: transparent; font-weight: 500; color: var(--c-ink-soft); }
 </style>
