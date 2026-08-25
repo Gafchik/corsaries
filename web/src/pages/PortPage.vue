@@ -36,7 +36,10 @@
       <div class="sheet__scroll">
         <!-- Рынок -->
         <div v-if="tab === 'market'" class="panel">
-          <div class="row__sub">Количество: ◀ ▶ (или A/D) на выбранном поле</div>
+          <div class="market-toolbar">
+            <div class="row__sub">Количество: ◀ ▶ (или A/D) на выбранном поле</div>
+            <button v-if="hasCargo" class="mini-btn mini-btn--flat" @click="sellAll">Продать всё</button>
+          </div>
           <div v-for="p in market" :key="p.type" class="row">
             <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" v-html="productIcon(p.type)"></svg></div>
             <div class="row__main">
@@ -204,6 +207,8 @@ function owned(type) {
   return ship.value?.products?.[type] ?? 0
 }
 
+const hasCargo = computed(() => market.value.some((p) => owned(p.type) > 0))
+
 // Shared by both Купить/Продать, so the input itself allows whichever of
 // the two is larger — the actual per-action ceiling (can't buy more than
 // the port has, can't sell more than's aboard) is enforced by disabling
@@ -237,6 +242,22 @@ async function trade(product, action) {
     const data = await api.trade(portId, product, action, qty)
     ship.value = data.ship
     coins.value = data.coins
+  })
+}
+
+// No bulk-sell endpoint — sequential single-product sells instead, one row
+// at a time. Sequential (not Promise.all) so each response's fresh
+// ship/coins state feeds the next iteration's owned() reads, rather than
+// racing several trades against the same stale snapshot.
+async function sellAll() {
+  await withErrorHandling(async () => {
+    for (const p of market.value) {
+      const qty = owned(p.type)
+      if (qty <= 0) continue
+      const data = await api.trade(portId, p.type, 'sell', qty)
+      ship.value = data.ship
+      coins.value = data.coins
+    }
   })
 }
 
@@ -396,6 +417,8 @@ watch(repairAmount, () => nextTick(refreshItems))
 
 .panel { display: flex; flex-direction: column; gap: 2px; padding: 0 12px; }
 .panel > .row__sub { color: var(--c-parchment-ink-soft); margin-bottom: 4px; }
+.market-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.market-toolbar .row__sub { margin-bottom: 0; }
 .row {
   display: flex;
   align-items: center;
