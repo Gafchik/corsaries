@@ -363,7 +363,14 @@ class WorldScene extends Phaser.Scene {
     for (const port of this.ports) {
       const marker = this.add.image(port.x, port.y, 'port-marker').setOrigin(0.5)
       marker.setDepth(2)
-      this.add.text(port.x, port.y + 22, port.name, { fontSize: '12px', color: '#ffffff', stroke: '#0a1f28', strokeThickness: 3 }).setOrigin(0.5, 0).setDepth(2)
+      // Dark backing pill behind the world-view name — a plain stroke read
+      // fine on open water but got lost against light sand right at a
+      // port's own shore, exactly where a player is looking at this label.
+      const worldLabel = this.add.text(port.x, port.y + 24, port.name, { fontSize: '13px', fontStyle: 'bold', color: '#f0c96b' }).setOrigin(0.5, 0).setDepth(3)
+      const worldLabelBg = this.add
+        .rectangle(port.x, port.y + 24 + worldLabel.height / 2, worldLabel.width + 14, worldLabel.height + 6, 0x06141a, 0.68)
+        .setOrigin(0.5)
+        .setDepth(2)
 
       // The real marker is only 36 world-units across — invisible at
       // minimap zoom. Same exaggerated-dot trick as the player marker,
@@ -372,6 +379,20 @@ class WorldScene extends Phaser.Scene {
       // reserved for hostile HP-bar/fill states elsewhere in the HUD.
       const miniDot = this.add.circle(port.x, port.y, 130, 0xd9a441).setStrokeStyle(30, 0x0b1a1f, 1).setDepth(999)
       this.cameras.main.ignore(miniDot)
+
+      // A screen-space (scrollFactor 0) label rendered THROUGH the minimap
+      // camera doesn't work here — that camera's own ~0.02-0.04 zoom shrinks
+      // everything it draws, screen-space or not, back into illegible dust
+      // (tried that first). This is world-space instead, same trick as
+      // miniDot above: sized enormous (a name easily 250-400 world-units
+      // tall) so the minimap camera's own zoom brings it back down to a
+      // normal-looking ~8-15 screen px, exactly the way miniDot's oversized
+      // world-radius does for the gold dot itself.
+      const miniLabel = this.add
+        .text(port.x, port.y + 190, port.name, { fontSize: '300px', fontStyle: 'bold', color: '#f0c96b', stroke: '#0b1a1f', strokeThickness: 40 })
+        .setOrigin(0.5, 0)
+        .setDepth(1000)
+      this.cameras.main.ignore(miniLabel)
     }
 
     // Real archipelago now, synced from the server (see state.islands) —
@@ -846,23 +867,32 @@ class WorldScene extends Phaser.Scene {
     // hidden from both cameras, same mistake the frame had earlier).
     this.cameras.main.ignore(this.minimapPlayerDot)
 
-    // A small fixed compass rose in the corner — same gold as the port
-    // markers and the frame's own border, generated once like they are.
-    const compassTexture = this.make.graphics({ x: 0, y: 0 })
-    compassTexture.lineStyle(1.4, 0xd9a441, 1)
-    compassTexture.strokeCircle(9, 9, 7.5)
-    compassTexture.fillStyle(0xd9a441, 1)
-    compassTexture.fillPoints([{ x: 9, y: 2 }, { x: 11.5, y: 9 }, { x: 9, y: 16 }, { x: 6.5, y: 9 }], true)
-    compassTexture.generateTexture('minimap-compass', 18, 18)
-    compassTexture.destroy()
-    this.minimapCompass = this.add.image(x + 12, y + 12, 'minimap-compass').setOrigin(0.5).setScrollFactor(0).setAlpha(0.9)
+    // Compass rose in the corner — world-space, same reasoning as the port
+    // labels above (a screen-space object rendered through THIS camera
+    // still gets crushed by its own zoom; drawn oversized in world units
+    // instead, inset from the map's own (0,0) corner, which the minimap
+    // always shows fixed at its own top-left since minimapCam never
+    // scrolls). No resize handling needed for the same reason miniDot
+    // doesn't need any — its world position never changes.
+    const compassGfx = this.add.graphics().setDepth(1000)
+    compassGfx.lineStyle(40, 0xd9a441, 1)
+    compassGfx.strokeCircle(420, 420, 260)
+    compassGfx.fillStyle(0xd9a441, 1)
+    compassGfx.fillPoints([{ x: 420, y: 340 }, { x: 460, y: 420 }, { x: 420, y: 500 }, { x: 380, y: 420 }], true)
+    this.cameras.main.ignore(compassGfx)
 
     // The frame/compass are screen-fixed HUD elements for the main camera
     // only, and the water tile is purely a main-view backdrop (at minimap
     // zoom its wave lines would just alias into noise) — the minimap camera
-    // must ignore all of them, or the frame/compass draw as giant shapes
-    // over the whole minimap and the water washes out its own flat tone.
-    this.minimapCam.ignore([this.minimapFrame, this.minimapCompass, this.waterTile, this.hpText, this.coordText, this.myNameText, this.myNameCard, this.myHpBar.bg, this.myHpBar.fill])
+    // must ignore both, or the frame draws as a giant shape over the whole
+    // minimap and the water washes out its own flat tone. The compass is
+    // NOT in this list on purpose — it's world-space now (see its own
+    // comment above) and needs to render THROUGH this camera, not be
+    // excluded from it.
+    this.minimapCam.ignore([
+      this.minimapFrame, this.waterTile,
+      this.hpText, this.coordText, this.myNameText, this.myNameCard, this.myHpBar.bg, this.myHpBar.fill,
+    ])
   }
 
   /** Re-lays out the minimap after the canvas itself has resized (see handleResize) — otherwise it stays pinned to its create()-time corner and size while the rest of the HUD moves. */
@@ -873,7 +903,6 @@ class WorldScene extends Phaser.Scene {
     this.minimapMaskShape.clear()
     this.minimapMaskShape.fillStyle(0xffffff)
     this.minimapMaskShape.fillRoundedRect(x, y, size, size, 10)
-    this.minimapCompass.setPosition(x + 12, y + 12)
     this.minimapCam.setViewport(x, y, size, size)
     this.minimapCam.setZoom(size / MAP_SIZE)
   }

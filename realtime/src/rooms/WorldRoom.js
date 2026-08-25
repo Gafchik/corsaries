@@ -738,7 +738,12 @@ export class WorldRoom extends Room {
         // random-walk market that's a coin flip either way.
         if (!attacker.isBot) {
           const tier = SHIP_TYPES.indexOf(target.shipType)
-          const bounty = (Math.floor(Math.random() * 51) + 30) * (Math.max(0, tier) + 1)
+          // Was (30-80) * (tier+1) — a boat's own 30-80 gold barely covered
+          // a fifth of repairing the 500 HP it took to sink it, no real
+          // reason to bother at the bottom of the tier ladder. 5x base and
+          // width — a boat's now a real (if modest) 150-250, not a rounding
+          // error next to a battleship's own payout.
+          const bounty = (Math.floor(Math.random() * 101) + 150) * (Math.max(0, tier) + 1)
           awardBounty(attacker.userId, bounty).catch((e) => console.error('awardBounty failed', e))
           this.broadcast('bounty', { attackerId, targetId, amount: bounty })
 
