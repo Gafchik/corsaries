@@ -37,12 +37,14 @@ const DEATH_LOSS_MIN = 0.05
 const DEATH_LOSS_MAX = 0.15
 const DEATH_RESPAWN_HP_FRACTION = 0.5
 
-// A shlyupka fresh out of spawn shouldn't run into a Battleship — the
-// original's actual bug (see architecture DECK 08). Tier N only becomes
-// possible once a bot is spawning at least N * TIER_DISTANCE_STEP away from
-// the map center; within any allowed range, weighting still favors the
-// weaker end so strong ships stay rare, not "as common as weak ones."
-const TIER_DISTANCE_STEP = 440
+// Flat global distribution — every bot everywhere rolls against the same
+// table, not gated by distance from spawn (that used to mean a bot
+// anywhere near spawn was ALWAYS a Boat, which is exactly why bots read as
+// uniformly weak — direct feedback, exact percentages requested).
+const BOT_SHIP_TYPE_WEIGHTS = {
+  boat: 30, schooner: 24, caravel: 17, brig: 11,
+  frigate: 7, galleon: 5, corvette: 4, battleship: 2,
+}
 
 // Keep in sync with MAP_SIZE in web/src/pages/WorldPage.vue until these two
 // packages share a constants module. Islands themselves are no longer
@@ -365,7 +367,7 @@ export class WorldRoom extends Room {
       y = 100 + Math.random() * (MAP_SIZE - 200)
     } while (this.collidesWithIsland(x, y))
 
-    const shipType = this.pickBotShipType(x, y)
+    const shipType = this.pickBotShipType()
     // Aggressive bots hunt anyone in aggro range, unprompted — original
     // Move_in_Battle behavior. Calm ones stay in patrol and ignore players
     // entirely until one of them actually opens fire, then fight back at
@@ -393,25 +395,13 @@ export class WorldRoom extends Room {
     this.clock.setTimeout(() => this.spawnBot(), BOT_RESPAWN_DELAY_MS)
   }
 
-  /**
-   * Weighted by distance from the map center: the tier ceiling only rises
-   * with distance, and even once a strong tier is unlocked, the weighting
-   * still favors the weaker end of the allowed range (weight ~ 1/(tier+1))
-   * so, say, Frigates stay rare rather than as common as Boats the moment
-   * they're merely possible.
-   */
-  pickBotShipType(x, y) {
-    const distance = Math.hypot(x - SPAWN.x, y - SPAWN.y)
-    const maxTier = Math.min(SHIP_TYPES.length - 1, Math.floor(distance / TIER_DISTANCE_STEP))
-
-    const weights = []
-    for (let tier = 0; tier <= maxTier; tier++) weights.push(1 / (tier + 1))
-    const total = weights.reduce((a, b) => a + b, 0)
-
+  /** Straight roll against BOT_SHIP_TYPE_WEIGHTS — see its own comment. */
+  pickBotShipType() {
+    const total = Object.values(BOT_SHIP_TYPE_WEIGHTS).reduce((a, b) => a + b, 0)
     let roll = Math.random() * total
-    for (let tier = 0; tier <= maxTier; tier++) {
-      roll -= weights[tier]
-      if (roll <= 0) return SHIP_TYPES[tier]
+    for (const type of SHIP_TYPES) {
+      roll -= BOT_SHIP_TYPE_WEIGHTS[type]
+      if (roll <= 0) return type
     }
     return SHIP_TYPES[0]
   }
