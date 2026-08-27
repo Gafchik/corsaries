@@ -44,7 +44,7 @@
             <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" v-html="productIcon(p.type)"></svg></div>
             <div class="row__main">
               <div class="row__title">{{ p.name }}</div>
-              <div class="row__sub">{{ p.price }} зол · в наличии {{ p.stock }} · у меня {{ owned(p.type) }}</div>
+              <div class="row__sub">{{ p.price }} зол · вес {{ p.weight }} · в наличии {{ p.stock }} · у меня {{ owned(p.type) }}</div>
             </div>
             <input
               :value="quantities[p.type]"
@@ -155,7 +155,15 @@ import ShipInfoOverlay from '@/components/ShipInfoOverlay.vue'
 const props = defineProps({
   portId: { type: [String, Number], required: true },
 })
-const emit = defineEmits(['close'])
+// 'shipChanged' — fired right after repair/buyShip/upgradeCannon's own
+// response lands (see those functions below), not just on 'close'. Closing
+// used to be the ONLY trigger for WorldPage.vue's refresh_ship — fine as
+// long as the player waits for the action's response first, but clicking
+// Уплыть right after Починить (before that response comes back) raced
+// refresh_ship's own DB read against the still-in-flight repair write, and
+// could read the pre-repair hp. Firing this the instant each action is
+// actually confirmed removes the race instead of just narrowing it.
+const emit = defineEmits(['close', 'shipChanged'])
 function close() {
   emit('close')
 }
@@ -275,19 +283,17 @@ async function trade(product, action) {
   })
 }
 
-// No bulk-sell endpoint — sequential single-product sells instead, one row
-// at a time. Sequential (not Promise.all) so each response's fresh
-// ship/coins state feeds the next iteration's owned() reads, rather than
-// racing several trades against the same stale snapshot.
+// One request (see api.sellAll/PortController::sellAll) — used to be a
+// sequential trade() per owned product, which left a real window for
+// closing the port (Уплыть re-enables movement immediately) to sail the
+// ship out of range before the LATER iterations' requests even went out,
+// silently truncating "sell everything" to whatever cleared first. A
+// single atomic server-side request has no such window.
 async function sellAll() {
   await withErrorHandling(async () => {
-    for (const p of market.value) {
-      const qty = owned(p.type)
-      if (qty <= 0) continue
-      const data = await api.trade(props.portId, p.type, 'sell', qty)
-      ship.value = data.ship
-      coins.value = data.coins
-    }
+    const data = await api.sellAll(props.portId)
+    ship.value = data.ship
+    coins.value = data.coins
   })
 }
 
@@ -301,6 +307,7 @@ async function buyShip(type) {
     // shows them without needing a full page reload.
     cannons.value = (await api.getCannons(props.portId)).cannons
     notifyShipSwap(data.refund)
+    emit('shipChanged')
   })
 }
 
@@ -334,6 +341,7 @@ async function repair() {
     ship.value = data.ship
     coins.value = data.coins
     repairAmount.value = maxAffordableRepair.value || 1
+    emit('shipChanged')
   })
 }
 
@@ -342,6 +350,7 @@ async function upgradeCannon(slot) {
     const data = await api.upgradeCannon(props.portId, slot)
     cannons.value = data.cannons
     coins.value = data.coins
+    emit('shipChanged')
   })
 }
 

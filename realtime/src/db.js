@@ -45,35 +45,58 @@ export async function awardBounty(userId, amount) {
   await pool.query('UPDATE users SET coins = coins + $1 WHERE id = $2', [amount, userId])
 }
 
+// Keep in sync with api/config/ships.php's price column — the gold penalty
+// below is a percentage of THIS (the current hull's own price), not of
+// whatever's actually in the player's wallet. It used to be the latter (a
+// straight percentage of current coins, same survivalFraction that still
+// governs products/crew below) — but a progression-curve simulation (real
+// config numbers, Monte Carlo over thousands of fights) showed that quietly
+// capping how much gold a player could ever hold onto: a bot kill's reward
+// is flat per tier, but a percentage-of-holdings loss grows right along
+// with a stockpile, so the two converge and progress stalls well short of
+// the next hull's price. A flat cut tied to the ship itself doesn't have
+// that problem — it stays gentle (3%) and scales with what actually
+// changed (a bigger, more expensive ship), not with unrelated savings.
+const SHIP_PRICE = {
+  boat: 5000, schooner: 10000, caravel: 15000, brig: 25000,
+  frigate: 40000, galleon: 65000, corvette: 100000, battleship: 200000,
+}
+const DEATH_GOLD_PENALTY_FRACTION = 0.03
+
 // Sinking a human costs something real, same principle as bot loot (see
-// generateBotCargo) — survivalFraction is what's LEFT, not what's lost (0.85
-// to 0.95 for the requested 5-15% loss). Touches gold, cargo, and crew all
-// at once; a sailorless or emptied-hold ship is a perfectly valid resulting
-// state, not cleaned up specially.
-// $1 needs an explicit ::float cast in every query below — without it,
-// Postgres infers $1's type from the surrounding expression (coins * $1,
-// an integer column) as integer too, then chokes trying to parse the
-// actual 0.85-0.95 fraction as one ("invalid input syntax for type
-// integer"). Silently failed every single time in production — no death
+// generateBotCargo). Gold uses the flat, tier-based cut described above;
+// cargo and crew still use survivalFraction (what's LEFT, not what's lost —
+// 0.85 to 0.95 for the original 5-15% loss) — those aren't hoarded
+// unboundedly the way gold is (cargo's capped by hold space, crew by
+// max_sailors), so the same stalling problem never applied to them.
+// $1 needs an explicit ::float cast in the product/sailor queries below —
+// without it, Postgres infers $1's type from the surrounding expression
+// (quantity * $1, an integer column) as integer too, then chokes trying to
+// parse the actual 0.85-0.95 fraction as one ("invalid input syntax for
+// type integer"). Silently failed every single time in production — no
 // penalty ever actually landed — until caught by reading the realtime
 // container's own error logs after deploy.
 //
 // Returns what was actually lost (gold + per-product amounts) — the exact
-// same numbers the UPDATE below computes, just read back before/after
+// same numbers the UPDATEs below compute, just read back before/after
 // instead of trusted from a RETURNING clause across three separate tables
 // — so the caller (see resolveHit/spawnCargoDrop in WorldRoom.js) can drop
 // it as a floating crate instead of it just vanishing into the death
 // penalty the way it used to.
 export async function applyDeathPenalty(userId, survivalFraction) {
-  const shipRow = await pool.query('SELECT id FROM ships WHERE user_id = $1', [userId])
+  const shipRow = await pool.query('SELECT id, type FROM ships WHERE user_id = $1', [userId])
   const shipId = shipRow.rows[0]?.id ?? null
+  const shipType = shipRow.rows[0]?.type ?? 'boat'
 
   const before = await pool.query('SELECT coins FROM users WHERE id = $1', [userId])
   const productsBefore = shipId
     ? await pool.query('SELECT type, quantity FROM ship_products WHERE ship_id = $1', [shipId])
     : { rows: [] }
 
-  await pool.query('UPDATE users SET coins = FLOOR(coins * $1::float) WHERE id = $2', [survivalFraction, userId])
+  const coinsBefore = before.rows[0]?.coins ?? 0
+  const goldPenalty = Math.min(coinsBefore, Math.round((SHIP_PRICE[shipType] ?? SHIP_PRICE.boat) * DEATH_GOLD_PENALTY_FRACTION))
+  await pool.query('UPDATE users SET coins = coins - $1 WHERE id = $2', [goldPenalty, userId])
+
   await pool.query(
     `UPDATE ship_products SET quantity = GREATEST(0, FLOOR(quantity * $1::float))
      WHERE ship_id = (SELECT id FROM ships WHERE user_id = $2)`,
@@ -85,8 +108,7 @@ export async function applyDeathPenalty(userId, survivalFraction) {
     [survivalFraction, userId],
   )
 
-  const coinsBefore = before.rows[0]?.coins ?? 0
-  const lostGold = coinsBefore - Math.floor(coinsBefore * survivalFraction)
+  const lostGold = goldPenalty
   const lostProducts = {}
   for (const row of productsBefore.rows) {
     const lost = row.quantity - Math.floor(row.quantity * survivalFraction)

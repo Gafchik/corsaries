@@ -37,6 +37,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/ports', [PortController::class, 'index']);
     Route::get('/ports/{port}', [PortController::class, 'show']);
     Route::post('/ports/{port}/trade', [PortController::class, 'trade']);
+    Route::post('/ports/{port}/market/sell-all', [PortController::class, 'sellAll']);
     Route::post('/ports/{port}/shipyard', [PortController::class, 'buyShip']);
     Route::post('/ports/{port}/tavern', [PortController::class, 'tavern']);
     Route::post('/ports/{port}/repair', [PortController::class, 'repair']);

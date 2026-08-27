@@ -81,6 +81,11 @@ export const api = {
   getPort: (portId) => request(`/ports/${portId}`),
   trade: (portId, product, action, quantity) =>
     request(`/ports/${portId}/trade`, { method: 'POST', body: { product, action, quantity } }),
+  // One atomic server-side request instead of one trade() per owned
+  // product — see PortController::sellAll's own comment for why that
+  // client-side loop was a real race (closing the port mid-sequence could
+  // let the ship sail out of range before later iterations even sent).
+  sellAll: (portId) => request(`/ports/${portId}/market/sell-all`, { method: 'POST' }),
   buyShip: (portId, type) => request(`/ports/${portId}/shipyard`, { method: 'POST', body: { type } }),
   tavern: (portId, type, action) => request(`/ports/${portId}/tavern`, { method: 'POST', body: { type, action } }),
   // amount is HP, not gold — the server derives cost from its own price

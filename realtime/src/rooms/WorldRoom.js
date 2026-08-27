@@ -141,13 +141,65 @@ const BOT_RESPAWN_DELAY_MS = 4000
 // than a player's own Boat — exactly backwards from what SHIP_SPEED_MULT
 // says should happen.
 const BOT_SPEED = 220
-const BOT_AGGRO_RANGE = 320 // was 500 — noticing a ship from nearly across the screen read as bots having eyes everywhere
+// Was 320 (before that, 500) — with the new fight-or-flee system (see
+// SHIP_POWER/shouldBotEngage) a bot's OWN judgment already decides whether
+// it's worth chasing, so a tight range isn't doing much load-bearing
+// "don't be an omniscient bully" work anymore; it just meant a real
+// engagement circle too small to actually chase or flee inside of before
+// hitting the range wall — 3x wider (direct feedback).
+const BOT_AGGRO_RANGE = 960
 // With 100 bots on the map, a relay of different aggressive ones drifting
 // in and out of range read as one endless, un-losable chase — a bot now
 // gives up after a bounded chase, same as the original's AI not being
 // infinitely persistent, and won't re-engage anyone for a cooldown after.
 const BOT_MAX_CHASE_MS = 15000
 const BOT_GIVE_UP_COOLDOWN_MS = 6000
+// "How much of a threat is this ship" — HP × total broadside damage (both
+// cannons of one side firing at once), the classic "how many exchanges can
+// it win" combat-power heuristic. Only ever used to weigh a BOT's own
+// fight-or-flee odds (see shouldBotEngage/nearbyHostilePower) — never
+// touches actual combat resolution, that's still purely handleFire/
+// broadsideCannons/tickCannonballs. Computed by hand from SHIP_MAX_HP ×
+// (SHIP_CANNON_COUNT/2 × CANNON_BASE.damage) — keep in sync if any of
+// those three change.
+const SHIP_POWER = {
+  boat: 22500, schooner: 100000, caravel: 378000, brig: 680800,
+  frigate: 2000000, galleon: 5382000, corvette: 3316500, battleship: 14100000,
+}
+// A real player should win a fair fight against an equal-tier bot more
+// often than not — bots fought at even odds (~50/50, see the balance-sim
+// results) made "you and it are the same size" feel like a coinflip
+// instead of a real fight to win. Cannon damage only (not HP, not the
+// engage/flee judgment below) — bots are simply worse gunners than a real
+// captain, not smaller ships. Applied in broadsideCannons.
+const BOT_DAMAGE_MULT = 0.8
+// Steepness of the engage/flee sigmoid (see shouldBotEngage) — ratio=1
+// (evenly matched) lands at 50%, ratio=2 at 80%, ratio=0.5 at 20%, ratio=4
+// at 94%, ratio=0.25 at 6%. Clamped so neither a hopeless nor a trivial
+// fight is ever a hard 0% or 100% — even a Шлюпка occasionally takes a
+// swing at a Линкор, and a Линкор occasionally lets a Шлюпка go (its cargo
+// isn't worth the trouble).
+const BOT_ENGAGE_POWER_EXPONENT = 2
+const BOT_ENGAGE_CHANCE_MIN = 0.03
+const BOT_ENGAGE_CHANCE_MAX = 0.97
+// A wounded ship runs regardless of how the fight started or how good the
+// odds looked at the time — re-checked every tick a bot is in combat, see
+// tickBots.
+const BOT_LOW_HP_FLEE_FRACTION = 0.28
+// How far a fleeing bot will bother detouring toward a port instead of
+// just sailing straight away from the threat — real safety beats a random
+// direction, but not if the nearest one is halfway across the map.
+const BOT_FLEE_PORT_SEARCH_RANGE = 1800
+// Reaching safety (port, or just enough distance) doesn't mean "back to
+// business" the instant it happens — same giveUpUntil cooldown the
+// existing chase-timeout already uses, just a bit longer: this bot was
+// actually losing a fight a moment ago, not merely failing to catch
+// someone, so it takes longer to calm down before it'll wander back out
+// or size up another target. A bot that actually made it INTO a port
+// during this (see tickBots) also gets healed to full for free right
+// then — no gold, no ship menu, it's a bot, but "sailed into harbor,
+// patched up, sailed back out" beats a permanently half-dead patrol NPC.
+const BOT_FLEE_RECOVER_MS = 20000
 // Fraction of the remaining angle closed per tick, at 60 ticks/sec. Was
 // 0.06 originally (too slow — a circling player could keep the bot's
 // broadside from ever lining up), bumped to 0.22 to fix that — which
@@ -301,7 +353,9 @@ export class WorldRoom extends Room {
     this.onMessage('refresh_ship', (client) => {
       const player = this.state.players.get(client.sessionId)
       if (!player) return
-      this.refreshShipFromDb(client.sessionId, player).catch((e) => console.error('refresh_ship failed', e))
+      this.refreshShipFromDb(client.sessionId, player)
+        .then(() => this.sendBroadsideStats(client, player.shipType, client.sessionId))
+        .catch((e) => console.error('refresh_ship failed', e))
     })
 
     for (let i = 0; i < TARGET_BOT_COUNT; i++) this.spawnBot()
@@ -400,6 +454,7 @@ export class WorldRoom extends Room {
     this.state.players.set(client.sessionId, player)
 
     this.playerCannonLevels.set(client.sessionId, await loadShipCannonLevels(userId))
+    this.sendBroadsideStats(client, shipType, client.sessionId)
   }
 
   /** Re-reads shipType/maxHp/hp/cannon levels from the DB into an already-live Player — see the 'refresh_ship' handler's own comment for why this needs to exist at all. Same fields onJoin sets from the same loadShip/loadShipCannonLevels calls, just applied to an existing player instead of a fresh one. */
@@ -410,6 +465,29 @@ export class WorldRoom extends Room {
     player.maxHp = SHIP_MAX_HP[saved.type] ?? SHIP_MAX_HP.boat
     player.hp = saved.hp
     this.playerCannonLevels.set(sessionId, await loadShipCannonLevels(player.userId))
+  }
+
+  /**
+   * Pushes both broadsides' real current range to the client, already
+   * translated to the UI-facing fireLeft/fireRight naming (the same
+   * inversion the 'fired' broadcast uses) — WorldPage.vue's aim-hold
+   * preview (lastKnownRange) otherwise only ever learned a side's range
+   * from that side's OWN first 'fired' broadcast, which meant a side that
+   * hadn't fired yet THIS session showed the small DEFAULT_AIM_RANGE
+   * fallback even on a ship whose real range was much bigger — an
+   * intermittent-feeling bug that was really just "whichever side you
+   * haven't fired from yet" (direct feedback: fired right, aimed left,
+   * got a tiny cone; fired left once, then it was correct). Called right
+   * after anything that could change either side's real range: onJoin and
+   * 'refresh_ship' (cannon upgrades, a new hull).
+   */
+  sendBroadsideStats(client, shipType, sessionId) {
+    const right = this.broadsideCannons(shipType, sessionId, 'right')
+    const left = this.broadsideCannons(shipType, sessionId, 'left')
+    client.send('broadside_stats', {
+      fireLeft: { range: Math.max(...right.cannons.map((c) => c.range)) },
+      fireRight: { range: Math.max(...left.cannons.map((c) => c.range)) },
+    })
   }
 
   async onLeave(client) {
@@ -498,7 +576,13 @@ export class WorldRoom extends Room {
     bot.temperament = temperament
     this.state.players.set(id, bot)
 
-    this.botRuntime.set(id, { mode: 'patrol', headingChangedAt: Date.now(), shipType, temperament, provokedBy: null })
+    this.botRuntime.set(id, {
+      mode: 'patrol', headingChangedAt: Date.now(), shipType, temperament, provokedBy: null,
+      // engageRollTargetId/engageRollResult: cached fight-or-ignore roll for
+      // aggressive bots (see pickBotTarget). fleeing: currently running from
+      // its target instead of fighting (see tickBots/shouldBotEngage).
+      engageRollTargetId: null, engageRollResult: false, fleeing: false,
+    })
   }
 
   respawnBotLater(botId) {
@@ -527,6 +611,15 @@ export class WorldRoom extends Room {
    * LOOT_LOSS reduction anymore — that existed to make a free, guaranteed,
    * un-contested reward feel less free; a race for a 60-second floating
    * crate already costs something (getting there first).
+   *
+   * amount was (5 + rand(16)) * (tier + 1) — a single Boat-tier kill
+   * already averaged ~210 weight (products.php's weights, mixed with the
+   * ~3-item spread above), well over half a Шлюпка's own 350 capacity in
+   * ONE drop (direct feedback: holds filled after a kill or two). Both
+   * the per-roll spread and the tier multiplier's growth are cut here —
+   * (3 + rand(6)) instead of (5 + rand(16)), and a gentler 1 + tier*0.4
+   * instead of a flat tier+1 — landing a same-tier kill around ~15-25% of
+   * that tier's OWN capacity instead of ~50-60%.
    */
   generateBotCargo(tier) {
     const shuffled = [...PRODUCT_TYPES].sort(() => Math.random() - 0.5)
@@ -534,7 +627,7 @@ export class WorldRoom extends Room {
 
     const items = {}
     for (const type of shuffled.slice(0, productCount)) {
-      const amount = (5 + Math.floor(Math.random() * 16)) * (tier + 1)
+      const amount = Math.round((3 + Math.floor(Math.random() * 6)) * (1 + tier * 0.4))
       if (amount > 0) items[type] = amount
     }
     return items
@@ -564,14 +657,31 @@ export class WorldRoom extends Room {
   }
 
   /**
-   * Aggressive bots go after whoever's nearest. Calm ones ignore everyone
-   * until provoked, then only ever chase that specific attacker — they
-   * don't switch targets just because someone else got closer, and they
-   * naturally stop caring once that attacker leaves aggro range (no
-   * separate "forgive" timer needed, the existing range check covers it).
+   * Aggressive bots go after whoever's nearest — but only if they actually
+   * like their odds (see shouldBotEngage): a Шлюпка noticing a Линкор
+   * doesn't charge it just because it's the closest thing around. Rolled
+   * once per (bot, target) pair, cached on runtime, not re-rolled every
+   * tick — otherwise a borderline power ratio would flicker between
+   * chasing and ignoring from one frame to the next. A declined target
+   * stays declined (this bot just isn't picking that fight) until a
+   * different human becomes the nearest one instead.
+   *
+   * Calm ones ignore everyone until provoked, then only ever chase that
+   * specific attacker — they don't switch targets just because someone
+   * else got closer, and they naturally stop caring once that attacker
+   * leaves aggro range (no separate "forgive" timer needed, the existing
+   * range check covers it).
    */
   pickBotTarget(bot, runtime) {
-    if (runtime.temperament === 'aggressive') return this.nearestHumanTarget(bot)
+    if (runtime.temperament === 'aggressive') {
+      const nearest = this.nearestHumanTarget(bot)
+      if (!nearest) return null
+      if (runtime.engageRollTargetId !== nearest.id) {
+        runtime.engageRollTargetId = nearest.id
+        runtime.engageRollResult = this.shouldBotEngage(bot, this.nearbyHostilePower(bot))
+      }
+      return runtime.engageRollResult ? nearest : null
+    }
 
     if (!runtime.provokedBy) return null
     const attacker = this.state.players.get(runtime.provokedBy)
@@ -580,6 +690,56 @@ export class WorldRoom extends Room {
       return null
     }
     return { id: runtime.provokedBy, player: attacker, dist: Math.hypot(attacker.x - bot.x, attacker.y - bot.y) }
+  }
+
+  /**
+   * Sigmoid on the power ratio (myPower/enemyPower) — see
+   * BOT_ENGAGE_POWER_EXPONENT's own comment for the actual breakpoints.
+   * Shared by every fight-or-flee decision a bot makes (whether to chase a
+   * new target, whether to fight back when hit, whether to keep fighting)
+   * so a ship's willingness to fight is symmetric regardless of which side
+   * threw the first punch.
+   */
+  shouldBotEngage(bot, enemyPower) {
+    const myPower = SHIP_POWER[bot.shipType] ?? SHIP_POWER.boat
+    const ratio = myPower / Math.max(1, enemyPower)
+    const r = Math.pow(ratio, BOT_ENGAGE_POWER_EXPONENT)
+    const chance = Math.min(BOT_ENGAGE_CHANCE_MAX, Math.max(BOT_ENGAGE_CHANCE_MIN, r / (r + 1)))
+    return Math.random() < chance
+  }
+
+  /**
+   * Total SHIP_POWER of every human within BOT_AGGRO_RANGE of this bot
+   * (ported ones excluded — they're not a threat, they're docked) — what a
+   * bot actually weighs its odds against, not just whichever single human
+   * it happens to be looking at. A Каравелла isn't spooked by 2 Шлюпки
+   * ganging up (their combined power is still a fraction of its own), but
+   * a Шлюпка facing even one Каравелла correctly reads that as hopeless —
+   * same formula, the ratio just does the work either way.
+   */
+  nearbyHostilePower(bot) {
+    let total = 0
+    for (const [, player] of this.state.players) {
+      if (player.isBot) continue
+      if (this.isNearAnyPort(player.x, player.y)) continue
+      if (Math.hypot(player.x - bot.x, player.y - bot.y) > BOT_AGGRO_RANGE) continue
+      total += SHIP_POWER[player.shipType] ?? SHIP_POWER.boat
+    }
+    return total
+  }
+
+  /** Nearest port within maxDist, or null — used by fleeStep to head for actual safety instead of just away from the threat, only when one's close enough to matter. */
+  nearestPortWithin(bot, maxDist) {
+    let best = null
+    let bestDist = Infinity
+    for (const port of this.ports) {
+      const dist = Math.hypot(port.x - bot.x, port.y - bot.y)
+      if (dist < bestDist && dist <= maxDist) {
+        bestDist = dist
+        best = port
+      }
+    }
+    return best
   }
 
   tickBots(deltaMs) {
@@ -600,6 +760,7 @@ export class WorldRoom extends Room {
 
       if (!inRange) {
         runtime.chaseStartedAt = null
+        runtime.fleeing = false
         this.patrolStep(bot, runtime, now, deltaMs)
         continue
       }
@@ -613,6 +774,30 @@ export class WorldRoom extends Room {
         runtime.giveUpUntil = now + BOT_GIVE_UP_COOLDOWN_MS
         if (runtime.temperament === 'calm') runtime.provokedBy = null
         this.patrolStep(bot, runtime, now, deltaMs)
+        continue
+      }
+
+      // A wounded ship runs regardless of how the fight started or how
+      // good the odds looked at the time (see shouldBotEngage) — checked
+      // every tick a bot is actually in range of its target, not just once
+      // at the moment it was provoked.
+      if (bot.hp / bot.maxHp < BOT_LOW_HP_FLEE_FRACTION) runtime.fleeing = true
+
+      if (runtime.fleeing) {
+        if (this.isNearAnyPort(bot.x, bot.y)) {
+          // Reached safety — same "cool off before caring about anyone
+          // again" shape as a timed-out chase just above, only longer:
+          // this bot was actually losing a fight, not merely failing to
+          // catch someone (see BOT_FLEE_RECOVER_MS's own comment).
+          runtime.fleeing = false
+          runtime.chaseStartedAt = null
+          runtime.giveUpUntil = now + BOT_FLEE_RECOVER_MS
+          bot.hp = bot.maxHp
+          if (runtime.temperament === 'calm') runtime.provokedBy = null
+          this.patrolStep(bot, runtime, now, deltaMs)
+        } else {
+          this.fleeStep(bot, runtime, target.player, deltaMs)
+        }
         continue
       }
 
@@ -647,8 +832,7 @@ export class WorldRoom extends Room {
     // target heading it's still turning toward) and steer away before it's
     // close enough to visibly run into a wall or island, instead of only
     // reacting once already blocked at the last tick.
-    const ahead = pointAhead(bot.x, bot.y, bot.rotation, LOOKAHEAD_DISTANCE)
-    const courseBlocked = this.isBlocked(ahead.x, ahead.y)
+    const courseBlocked = !this.pathClear(bot.x, bot.y, bot.rotation, LOOKAHEAD_DISTANCE)
 
     if (runtime.heading === undefined || now - runtime.headingChangedAt > BOT_HEADING_CHANGE_MS || courseBlocked) {
       runtime.heading = this.pickClearHeading(bot)
@@ -670,7 +854,7 @@ export class WorldRoom extends Room {
   }
 
   /**
-   * Samples random headings and keeps the first one whose lookahead point is
+   * Samples random headings and keeps the first one whose whole path is
    * clear, rather than a single random guess that's just as likely to point
    * straight back at the same wall or island. Falls back to reversing
    * course if nothing clear turns up — rare (would need to be boxed in on
@@ -679,10 +863,27 @@ export class WorldRoom extends Room {
   pickClearHeading(bot) {
     for (let i = 0; i < LOOKAHEAD_TRIES; i++) {
       const candidate = Math.random() * Math.PI * 2
-      const ahead = pointAhead(bot.x, bot.y, candidate, LOOKAHEAD_DISTANCE)
-      if (!this.isBlocked(ahead.x, ahead.y)) return candidate
+      if (this.pathClear(bot.x, bot.y, candidate, LOOKAHEAD_DISTANCE)) return candidate
     }
     return bot.rotation + Math.PI
+  }
+
+  /**
+   * Was a single check at the far end of the lookahead — fine for a
+   * roughly straight run, but a heading that curls along a coastline
+   * (exactly what fleeStep now often needs, heading for a port that's
+   * usually sitting right on the shore) could have a clear ENDPOINT while
+   * the straight-line path to it still clips a headland in between (direct
+   * feedback: a bot "caught on the edge" of an island while fleeing).
+   * Samples several points along the segment instead of just the last one.
+   */
+  pathClear(x, y, heading, distance) {
+    const steps = 4
+    for (let i = 1; i <= steps; i++) {
+      const p = pointAhead(x, y, heading, (distance * i) / steps)
+      if (this.isBlocked(p.x, p.y)) return false
+    }
+    return true
   }
 
   approachStep(bot, runtime, targetPlayer, deltaMs) {
@@ -693,6 +894,52 @@ export class WorldRoom extends Room {
     const heading = Math.atan2(targetPlayer.y - bot.y, targetPlayer.x - bot.x) + Math.PI / 2
     this.turnToward(bot, heading)
     this.advance(bot, this.botSpeed(runtime), deltaMs)
+  }
+
+  /**
+   * The opposite of approachStep, plus a real destination when one's
+   * close enough to bother with — heads for the nearest port within
+   * BOT_FLEE_PORT_SEARCH_RANGE (a real captain runs for safe harbor, not
+   * open water) and only falls back to a plain "straight away from the
+   * threat" heading when no port is close enough to matter.
+   */
+  fleeStep(bot, runtime, threat, deltaMs) {
+    runtime.mode = 'flee'
+    const port = this.nearestPortWithin(bot, BOT_FLEE_PORT_SEARCH_RANGE)
+    const goalHeading = port
+      ? Math.atan2(port.y - bot.y, port.x - bot.x) + Math.PI / 2
+      : Math.atan2(bot.y - threat.y, bot.x - threat.x) + Math.PI / 2
+    // The straight-line heading toward safety used to be all this did — a
+    // port sitting behind an island (or just an island in the way of
+    // "straight away from the threat") ran the bot bow-first into the
+    // shore and left it stalled there, still "fleeing" but going nowhere
+    // (direct feedback). pickHeadingToward steers around it while still
+    // generally heading toward the goal, same idea as patrol's own
+    // obstacle check just biased toward a direction instead of random.
+    const heading = this.pickHeadingToward(bot, goalHeading)
+    this.turnToward(bot, heading)
+    this.advance(bot, this.botSpeed(runtime), deltaMs)
+  }
+
+  /**
+   * Like pickClearHeading, but biased toward a specific goal direction
+   * instead of a uniformly random guess — tries the direct heading first,
+   * then increasingly wide offsets to either side, so a bot skirting
+   * around an island still generally continues toward its goal instead of
+   * wherever a random reroll happens to point. Recomputed fresh every
+   * tick (cheap, deterministic given the current position) rather than
+   * cached — no separate "reroll on failure" handling needed the way
+   * patrol's random pick required.
+   */
+  pickHeadingToward(bot, goalHeading) {
+    if (this.pathClear(bot.x, bot.y, goalHeading, LOOKAHEAD_DISTANCE)) return goalHeading
+    for (const offsetDeg of [15, 30, 45, 60, 90, 120, 150]) {
+      for (const sign of [1, -1]) {
+        const candidate = goalHeading + ((offsetDeg * Math.PI) / 180) * sign
+        if (this.pathClear(bot.x, bot.y, candidate, LOOKAHEAD_DISTANCE)) return candidate
+      }
+    }
+    return bot.rotation + Math.PI // fully boxed in — same last-resort reversal pickClearHeading uses
   }
 
   botSpeed(runtime) {
@@ -801,7 +1048,7 @@ export class WorldRoom extends Room {
     // upgradeable stat (see broadsideCannons/RELOAD_LEVEL_BONUS_FRACTION),
     // so "is this side off cooldown yet" needs this side's own real reload
     // time, not the flat constant it used to be.
-    const { cannons, cooldown } = this.broadsideCannons(attacker.shipType, attackerId, side)
+    const { cannons, cooldown } = this.broadsideCannons(attacker.shipType, attackerId, side, attacker.isBot)
 
     const cooldownKey = `${attackerId}:${side}`
     const lastFired = this.lastFiredAt.get(cooldownKey) ?? 0
@@ -854,12 +1101,14 @@ export class WorldRoom extends Room {
    * upgrade), or a human whose levels haven't finished loading yet — same
    * numbers a stock, unupgraded hull of that type would have either way.
    */
-  broadsideCannons(shipType, sessionId, side) {
+  broadsideCannons(shipType, sessionId, side, isBot = false) {
     const totalCannons = SHIP_CANNON_COUNT[shipType] ?? SHIP_CANNON_COUNT.boat
     const perSide = Math.max(1, Math.floor(totalCannons / 2))
     const levels = this.playerCannonLevels.get(sessionId)
     const base = CANNON_BASE[shipType] ?? CANNON_BASE.boat
     const offset = side === 'right' ? perSide : 0
+    // See BOT_DAMAGE_MULT's own comment — a bot's guns, not a bot's hull.
+    const damageMult = isBot ? BOT_DAMAGE_MULT : 1
 
     const cannons = []
     let levelSum = 0
@@ -867,7 +1116,7 @@ export class WorldRoom extends Room {
       const level = levels?.[offset + i] ?? 0
       const mult = 1 + CANNON_LEVEL_BONUS_FRACTION * level
       cannons.push({
-        damage: Math.round(base.damage * mult),
+        damage: Math.round(base.damage * mult * damageMult),
         range: Math.round(base.range * mult),
         speed: Math.round(base.speed * mult),
       })
@@ -933,6 +1182,11 @@ export class WorldRoom extends Room {
       const targetRuntime = this.botRuntime.get(targetId)
       if (targetRuntime?.temperament === 'calm' && !targetRuntime.provokedBy) {
         targetRuntime.provokedBy = attackerId
+        // Decided once, right when first provoked — not every tick, or a
+        // borderline power ratio would flicker between fighting back and
+        // running. Weighs every hostile human currently nearby, not just
+        // this one attacker (see nearbyHostilePower's own comment).
+        targetRuntime.fleeing = !this.shouldBotEngage(target, this.nearbyHostilePower(target))
       }
     }
 

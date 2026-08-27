@@ -76,7 +76,7 @@
           <div class="chip" v-for="type in productTypes" :key="type">
             <svg class="chip__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" v-html="productIcon(type)"></svg>
             <span class="chip__label">{{ PRODUCT_NAMES[type] ?? type }}</span>
-            <span class="chip__count">{{ shipInfo.products[type] }}</span>
+            <span class="chip__count">×{{ shipInfo.products[type] }} ({{ shipInfo.products[type] * (PRODUCT_WEIGHTS[type] ?? 0) }} веса)</span>
           </div>
         </div>
       </div>
@@ -100,6 +100,10 @@ const PRODUCT_NAMES = {
   rum: 'Ром', silk: 'Шёлк', water: 'Вода', food: 'Еда',
   leather: 'Кожа', wood: 'Дерево', tobacco: 'Табак', coffee: 'Кофе',
 }
+// Keep in sync with config/products.php's weights — per-unit weight
+// wasn't shown anywhere (here or the market), so "трюм почти полон" never
+// explained WHY one stack of Кожа ate 10x the space a stack of Рома did.
+const PRODUCT_WEIGHTS = { rum: 1, silk: 2, water: 1, food: 1, leather: 10, wood: 20, tobacco: 3, coffee: 7 }
 
 // Тот же набор пиктограмм товаров, что и на рынке в порту (см. api/config/products.php).
 const PRODUCT_ICONS = {

@@ -9,6 +9,7 @@ use App\Models\ShipProduct;
 use App\Models\ShipSailor;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class PortController extends Controller
 {
@@ -102,6 +103,56 @@ class PortController extends Controller
         }
 
         return response()->json(['ship' => ShipController::serialize($ship->fresh(['products', 'sailors'])), 'coins' => $request->user()->fresh()->coins]);
+    }
+
+    /**
+     * Everything in the hold, sold in one request — used to be the client
+     * looping single trade() calls product by product (sequential, not
+     * parallel, specifically so each response's fresh state fed the next
+     * iteration's owned() read). That loop lived entirely in the browser,
+     * so leaving the port mid-sequence (closing PortModal re-enables
+     * movement immediately) could let the ship sail out of PORT_ENTER_RANGE
+     * before the later iterations' requests were even sent, and
+     * proximityError would then reject THOSE — "sold everything" in fact
+     * only sold whatever cleared before you moved. One atomic request has
+     * no such window: it's already fully server-side by the time it's
+     * accepted, so the client walking away can't half-execute it.
+     */
+    public function sellAll(Request $request, Seaport $port): JsonResponse
+    {
+        if ($error = $this->proximityError($request, $port)) {
+            return $error;
+        }
+
+        $ship = $request->user()->ship()->firstOrFail();
+        $this->marketFor($port); // primes/refreshes this port's rows if they're missing or stale
+
+        $totalGold = DB::transaction(function () use ($ship, $port, $request) {
+            $gold = 0;
+            $rows = ShipProduct::where('ship_id', $ship->id)->where('quantity', '>', 0)->get();
+            $prices = SeaportProduct::where('seaport_id', $port->id)->get()->keyBy('type');
+
+            foreach ($rows as $row) {
+                $price = $prices->get($row->type)?->price;
+                if ($price === null) {
+                    continue;
+                }
+                $gold += $price * $row->quantity;
+                $row->update(['quantity' => 0]);
+            }
+
+            if ($gold > 0) {
+                $request->user()->increment('coins', $gold);
+            }
+
+            return $gold;
+        });
+
+        return response()->json([
+            'ship' => ShipController::serialize($ship->fresh(['products', 'sailors'])),
+            'coins' => $request->user()->fresh()->coins,
+            'sold_for' => $totalGold,
+        ]);
     }
 
     /**

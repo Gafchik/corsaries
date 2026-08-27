@@ -85,7 +85,13 @@
         input is locked for its duration (see the watch below) so you can't
         sail off or fire while the shop's open.
       -->
-      <PortModal v-if="activePortId" :key="activePortId" :port-id="activePortId" @close="activePortId = null" />
+      <PortModal
+        v-if="activePortId"
+        :key="activePortId"
+        :port-id="activePortId"
+        @close="activePortId = null"
+        @ship-changed="room.send('refresh_ship')"
+      />
     </div>
   </q-page>
 </template>
@@ -159,6 +165,15 @@ let game = null
 let room = null
 
 const MAP_SIZE = 4800
+// A phone (portrait OR landscape — see computeCameraZoom's own use of
+// Math.min) shows noticeably less world at zoom 1 than the desktop window
+// this was designed against, and the on-screen joystick/action buttons eat
+// further into what's left (direct feedback, screenshots comparing the
+// two). Zooming out on a small screen buys back some of that — 700 is
+// roughly a small-tablet's shorter side, so anything phone-sized clamps to
+// the 0.7 floor and anything tablet-or-bigger stays at a full 1.
+const CAMERA_ZOOM_REFERENCE = 700
+const CAMERA_ZOOM_MIN = 0.7
 const SHIP_SPEED = 220
 // Keep in sync with SHIP_SPEED_MULT in realtime/src/rooms/WorldRoom.js and
 // the `speed` column in config/ships.php.
@@ -236,14 +251,41 @@ const PRODUCT_NAMES = {
   rum: 'Ром', silk: 'Шёлк', water: 'Вода', food: 'Еда',
   leather: 'Кожа', wood: 'Дерево', tobacco: 'Табак', coffee: 'Кофе',
 }
+// Keep in sync with config/products.php's 'weight' field — used to bump
+// the cargo-hold bar (see addCargoWeight) the instant a cargo drop is
+// claimed, without waiting on a fresh api.getShip() round trip.
+const PRODUCT_WEIGHTS = { rum: 1, silk: 2, water: 1, food: 1, leather: 10, wood: 20, tobacco: 3, coffee: 7 }
 const HP_BAR_WIDTH = 36
 const HP_BAR_HEIGHT = 5
 // Between the ship and its name label (name sits at -28) — reads as
 // "belongs to this ship" without overlapping either.
 const HP_BAR_Y_OFFSET = -21
+const CARGO_BAR_HEIGHT = 4
+// Directly under the HP bar, own ship only — nobody else's cargo weight is
+// even known client-side (Player schema never carried it, see setCargo's
+// own comment), so there's nothing to draw for other ships anyway.
+const CARGO_BAR_Y_OFFSET = HP_BAR_Y_OFFSET + HP_BAR_HEIGHT + 2
 
 function shipLabel(name, shipType) {
   return `${name} (${SHIP_TYPE_NAMES[shipType] ?? shipType})`
+}
+
+/**
+ * Nearest positive distance along the ray (ox, oy) + t*(dx, dy) where it
+ * enters the circle centered at (cx, cy) with the given radius, or null if
+ * it never does. (dx, dy) must already be a unit vector. Used by
+ * WorldScene.rayObstructionDistance for the aim-hold preview.
+ */
+function rayCircleHit(ox, oy, dx, dy, cx, cy, radius) {
+  const fx = ox - cx
+  const fy = oy - cy
+  const b = fx * dx + fy * dy
+  const c = fx * fx + fy * fy - radius * radius
+  if (c <= 0) return 0 // origin already inside — stops immediately
+  const disc = b * b - c
+  if (disc < 0) return null
+  const t = -b - Math.sqrt(disc)
+  return t > 0 ? t : null
 }
 
 // Closed Catmull-Rom spline through a cyclic ring of points — real coasts
@@ -288,6 +330,16 @@ function nameColor(player) {
 // approaching by water instead of needing to hug the exact shore pixel.
 const PORT_ENTER_RANGE = 220
 const ABORDAGE_RANGE = 70 // "вплотную" — noticeably tighter than the port prompt
+// Keep in sync with CANNONBALL_HIT_RADIUS in realtime/src/rooms/WorldRoom.js
+// — used only to stop the aim-hold preview's rays at a ship they'd actually
+// hit (see drawAimCone/rayObstructionDistance), not real hit detection.
+const AIM_RAY_SHIP_RADIUS = 26
+// Sampling step for the aim ray's island check (see rayObstructionDistance)
+// — islands are irregular, not circles, so unlike the ship/port checks
+// there's no clean analytic intersection; marches in short steps and stops
+// at the first blocked sample instead, same idea as WorldRoom.js's own
+// pathClear.
+const AIM_RAY_STEP = 20
 
 class WorldScene extends Phaser.Scene {
   constructor() {
@@ -444,6 +496,20 @@ class WorldScene extends Phaser.Scene {
       fillTexture.destroy()
     }
 
+    // Same pill shape as the HP bar, one plain white fill (no good/mid/bad
+    // tiering — a full hold isn't "bad," it just means go sell) — see
+    // createCargoBar/updateCargoBar.
+    const cargoBarBgTexture = this.make.graphics({ x: 0, y: 0 })
+    cargoBarBgTexture.fillStyle(0x0b1a1f, 0.85)
+    cargoBarBgTexture.fillRoundedRect(0, 0, HP_BAR_WIDTH, CARGO_BAR_HEIGHT, CARGO_BAR_HEIGHT / 2)
+    cargoBarBgTexture.generateTexture('cargo-bar-bg', HP_BAR_WIDTH, CARGO_BAR_HEIGHT)
+    cargoBarBgTexture.destroy()
+    const cargoBarFillTexture = this.make.graphics({ x: 0, y: 0 })
+    cargoBarFillTexture.fillStyle(0xf4f4f2, 1)
+    cargoBarFillTexture.fillRoundedRect(0, 0, HP_BAR_WIDTH, CARGO_BAR_HEIGHT, CARGO_BAR_HEIGHT / 2)
+    cargoBarFillTexture.generateTexture('cargo-bar-fill', HP_BAR_WIDTH, CARGO_BAR_HEIGHT)
+    cargoBarFillTexture.destroy()
+
     for (const port of this.ports) {
       const marker = this.add.image(port.x, port.y, 'port-marker').setOrigin(0.5)
       marker.setDepth(2)
@@ -486,6 +552,59 @@ class WorldScene extends Phaser.Scene {
     // hand-rolled radial check matching the server's own island math is
     // simpler than swapping physics engines for this).
     this.islandsData = this.room.state.islands.map((i) => ({ x: i.x, y: i.y, baseRadius: i.baseRadius, points: [...i.points] }))
+
+    // Faint DASHED ring on the water at PORT_ENTER_RANGE around each port —
+    // same radius the server actually gates firing/abordage/bot-aggro on
+    // (isNearAnyPort in WorldRoom.js), drawn once (ports never move) so a
+    // player can actually SEE the safe zone's edge instead of only
+    // learning where it is by getting shot at right up to the line. A
+    // perfect solid circle read as a radar/debug overlay against the
+    // hand-drawn water and coastline (direct feedback) — dashed, plus a
+    // small per-port wobble on the radius (same idea as the islands' own
+    // organic, not-quite-circular coastline), reads as a chart marking
+    // instead. A port sits right at a shoreline too, so a plain full
+    // circle would cut straight across the island behind it — sampled
+    // around the circle instead, stroking only the (water AND dash-on)
+    // runs, leaving a gap both wherever it crosses land and between dashes.
+    this.portSafeZoneRings = []
+    const RING_DASH = 16
+    const RING_GAP = 12
+    for (const port of this.ports) {
+      const ring = this.add.graphics().setDepth(1)
+      ring.lineStyle(2, 0x9fe3a0, 0.3)
+      const steps = 200
+      const wobbleSeed = Math.random() * Math.PI * 2
+      let drawing = false
+      let arcLen = 0
+      let prevX = null
+      let prevY = null
+      for (let i = 0; i <= steps; i++) {
+        const angle = (i / steps) * Math.PI * 2
+        const wobble = 8 * Math.sin(angle * 3 + wobbleSeed) + 4 * Math.sin(angle * 7 + wobbleSeed * 1.7)
+        const radius = PORT_ENTER_RANGE + wobble
+        const x = port.x + Math.cos(angle) * radius
+        const y = port.y + Math.sin(angle) * radius
+        if (prevX !== null) arcLen += Math.hypot(x - prevX, y - prevY)
+        prevX = x
+        prevY = y
+
+        const shouldDraw = !this.collidesWithIsland(x, y) && arcLen % (RING_DASH + RING_GAP) < RING_DASH
+        if (shouldDraw) {
+          if (!drawing) {
+            ring.beginPath()
+            ring.moveTo(x, y)
+            drawing = true
+          } else {
+            ring.lineTo(x, y)
+          }
+        } else if (drawing) {
+          ring.strokePath()
+          drawing = false
+        }
+      }
+      if (drawing) ring.strokePath()
+      this.portSafeZoneRings.push(ring)
+    }
 
     for (const island of this.islandsData) {
       const gfx = this.add.graphics()
@@ -562,13 +681,29 @@ class WorldScene extends Phaser.Scene {
     // plumbing the way the top-left HUD text still does.
     this.meRef = me
     this.myHpBar = this.createHpBar(this.ship.x, this.ship.y + HP_BAR_Y_OFFSET)
+    // Cargo weight/capacity aren't in the Player schema at all (see
+    // setCargo's own comment) — starts at a harmless 0/1 until
+    // refreshCargo() in WorldPage.vue resolves its first api.getShip().
+    this.cargoWeight = 0
+    this.cargoCapacity = 1
+    this.myCargoBar = this.createCargoBar(this.ship.x, this.ship.y + CARGO_BAR_Y_OFFSET)
 
     this.cameras.main.startFollow(this.ship, true, 0.1, 0.1)
 
-    this.hpText = this.add.text(12, 12, `HP: ${me?.hp ?? this.myMaxHp}/${this.myMaxHp}`, { fontSize: '16px', color: '#ffffff' })
-    this.hpText.setScrollFactor(0)
-    this.coordText = this.add.text(12, 34, '', { fontSize: '13px', color: '#bcd9d1' })
+    // HP used to have its own corner readout here too — dropped (direct
+    // feedback: nobody's looking at a top-left number mid-fight) now that
+    // the floating bar over the ship itself already shows it live every
+    // frame (see updateHpBar in update()). Coordinates stayed — worth
+    // reading off deliberately (sharing a position, navigating to a port),
+    // not something you'd track by eye during combat the way HP is.
+    this.coordText = this.add.text(12, 12, '', { fontSize: '13px', color: '#bcd9d1' })
     this.coordText.setScrollFactor(0)
+    // Sets the real zoom on the camera (and repositions coordText for it)
+    // before setupMinimap below draws the minimap frame — drawMinimapFrame
+    // reads this.cameras.main.zoom itself, so it needs the real value
+    // already in place for its very first draw, not just from whatever
+    // resize happens to fire next.
+    this.applyCameraZoom()
 
     this.setupMinimap()
 
@@ -765,7 +900,19 @@ class WorldScene extends Phaser.Scene {
       }
     })
 
-    this.room.onMessage('hit', ({ attackerId, targetId, damage, hp }) => {
+    // Pushed on join and after anything that could change either side's
+    // real range (cannon upgrades, a new hull — see sendBroadsideStats in
+    // WorldRoom.js) — without this, a side that hadn't fired yet THIS
+    // session stayed on the small DEFAULT_AIM_RANGE fallback even on a
+    // ship with a much bigger real range, until it fired once itself. Same
+    // fix, just proactive instead of only reactive to this player's own
+    // 'fired' broadcasts above.
+    this.room.onMessage('broadside_stats', ({ fireLeft, fireRight }) => {
+      if (fireLeft?.range) this.lastKnownRange.fireLeft = fireLeft.range
+      if (fireRight?.range) this.lastKnownRange.fireRight = fireRight.range
+    })
+
+    this.room.onMessage('hit', ({ attackerId, targetId, damage }) => {
       // A broadside is now several independent balls (see
       // spawnBroadsideVolley) — this message is about exactly ONE of them
       // finding its mark, so only the visual ball nearest the target gets
@@ -774,7 +921,6 @@ class WorldScene extends Phaser.Scene {
       const targetY = targetId === mySessionId ? this.ship.y : this.otherShips.get(targetId)?.y
       if (targetX !== undefined) this.stopNearestCannonball(attackerId, targetX, targetY)
       if (targetId === mySessionId) {
-        this.hpText.setText(`HP: ${hp}/${this.myMaxHp}`)
         this.spawnDamageNumber(this.ship.x, this.ship.y, damage)
       } else {
         // The floating "-NN" (see spawnDamageNumber) is the "just got hit"
@@ -793,7 +939,7 @@ class WorldScene extends Phaser.Scene {
     // 'hit' above, now that a volley is several independent balls.
     this.room.onMessage('cannonball_blocked', ({ attackerId, x, y }) => this.stopNearestCannonball(attackerId, x, y))
 
-    this.room.onMessage('sunk', ({ targetId, respawnHp, respawnX, respawnY }) => {
+    this.room.onMessage('sunk', ({ targetId, respawnX, respawnY }) => {
       if (targetId !== mySessionId) return
       // The ship's own position is client-authoritative during normal play
       // (see the architecture note at the top of WorldRoom.js) — a
@@ -804,7 +950,12 @@ class WorldScene extends Phaser.Scene {
       this.ship.setVelocity(0, 0)
       this.lastGoodX = respawnX
       this.lastGoodY = respawnY
-      this.hpText.setText(`HP: ${respawnHp}/${this.myMaxHp} (потоплен, респавн у порта)`)
+      // Used to be baked into the now-removed corner hpText — reuses the
+      // same Notify toast path as a rejected action (see onActionRejected)
+      // rather than a dedicated callback just for this one rare event.
+      // respawnHp itself needs no separate mention — the floating bar over
+      // the ship already shows it live the instant this patch lands.
+      this.onActionRejected?.('Потоплен — респавн у ближайшего порта')
     })
 
     // Naval-kill loot is a floating CargoDrop now (see spawnCargoDrop in
@@ -1015,6 +1166,7 @@ class WorldScene extends Phaser.Scene {
     this.myNameText.setPosition(this.ship.x, this.ship.y - 28)
     this.myNameCard.setPosition(this.ship.x, this.ship.y + this.myNameCard.yOffset)
     this.updateHpBar(this.myHpBar, this.ship.x, this.ship.y, this.meRef?.hp ?? this.myMaxHp, this.myMaxHp)
+    this.updateCargoBar(this.myCargoBar, this.ship.x, this.ship.y, this.cargoWeight, this.cargoCapacity)
 
     this.checkNearBot()
     this.checkNearHuman()
@@ -1074,10 +1226,36 @@ class WorldScene extends Phaser.Scene {
   drawMinimapFrame(x, y, size) {
     const frame = this.minimapFrame
     frame.clear()
+    // frame is scrollFactor(0) but still rendered THROUGH the main camera,
+    // which now (see applyCameraZoom) can be zoomed out — and Phaser zooms
+    // a camera around its VIEWPORT CENTER, not its top-left corner, so a
+    // shape drawn at its real screen coordinates would end up dragged
+    // toward screen-center and shrunk. zoomCompensatePoint below picks the
+    // coordinates that land back at the real ones once that zoom applies;
+    // sizes/radii/line width scale by the same 1/zoom for the same reason.
+    const zoom = this.cameras.main.zoom
+    const p = this.zoomCompensatePoint(x - 2, y - 2)
+    const compSize = (size + 4) / zoom
     frame.fillStyle(0x0b1a1f, 0.85)
-    frame.fillRoundedRect(x - 2, y - 2, size + 4, size + 4, 12)
-    frame.lineStyle(2, 0xd9a441, 0.55)
-    frame.strokeRoundedRect(x - 2, y - 2, size + 4, size + 4, 12)
+    frame.fillRoundedRect(p.x, p.y, compSize, compSize, 12 / zoom)
+    frame.lineStyle(2 / zoom, 0xd9a441, 0.55)
+    frame.strokeRoundedRect(p.x, p.y, compSize, compSize, 12 / zoom)
+  }
+
+  /**
+   * Where a "should look fixed on screen" point (desiredX, desiredY) needs
+   * to actually be drawn so that, after the main camera's own zoom (which
+   * scales everything it renders around the camera's CENTER, not its
+   * top-left corner — including scrollFactor(0) objects, a common Phaser
+   * surprise), it lands back at that exact screen position. Only needed
+   * for scrollFactor(0) HUD that isn't already sitting dead-center —
+   * coordText and the minimap frame, specifically.
+   */
+  zoomCompensatePoint(desiredX, desiredY) {
+    const zoom = this.cameras.main.zoom
+    const cx = this.scale.width / 2
+    const cy = this.scale.height / 2
+    return { x: cx + (desiredX - cx) / zoom, y: cy + (desiredY - cy) / zoom }
   }
 
   setupMinimap() {
@@ -1139,7 +1317,9 @@ class WorldScene extends Phaser.Scene {
     // excluded from it.
     this.minimapCam.ignore([
       this.minimapFrame, this.waterTile,
-      this.hpText, this.coordText, this.myNameText, this.myNameCard, this.myHpBar.bg, this.myHpBar.fill,
+      this.coordText, this.myNameText, this.myNameCard, this.myHpBar.bg, this.myHpBar.fill,
+      this.myCargoBar.bg, this.myCargoBar.fill,
+      ...this.portSafeZoneRings,
     ])
   }
 
@@ -1164,7 +1344,33 @@ class WorldScene extends Phaser.Scene {
    */
   handleResize(gameSize) {
     this.cameras.main.setSize(gameSize.width, gameSize.height)
+    this.applyCameraZoom()
     this.repositionMinimap()
+  }
+
+  /**
+   * See CAMERA_ZOOM_REFERENCE/CAMERA_ZOOM_MIN's own comment — smaller of
+   * width/height so a landscape phone (wide but short) gets the same
+   * treatment as portrait (narrow but tall) instead of only being judged
+   * on whichever dimension happens to look "big enough." Re-run on every
+   * resize (rotation, a desktop window being dragged narrower), not just
+   * once at create — the minimap already re-lays itself out the same way
+   * (see repositionMinimap, called right after this).
+   */
+  applyCameraZoom() {
+    const zoom = Phaser.Math.Clamp(Math.min(this.scale.width, this.scale.height) / CAMERA_ZOOM_REFERENCE, CAMERA_ZOOM_MIN, 1)
+    this.cameras.main.setZoom(zoom)
+    // coordText is scrollFactor(0) but still rendered THROUGH the main
+    // camera, so it needs the same zoomCompensatePoint treatment as
+    // drawMinimapFrame (see that method's own comment for why a plain
+    // .setScale alone — what this used to do — only happens to work for
+    // something sitting dead-center, and visibly drags anything else, like
+    // this, toward the middle of the screen instead of staying put).
+    if (this.coordText) {
+      const p = this.zoomCompensatePoint(12, 12)
+      this.coordText.setPosition(p.x, p.y)
+      this.coordText.setScale(1 / zoom)
+    }
   }
 
   // 'left'/'right' here are screen-relative UI labels ('fireLeft'/'fireRight',
@@ -1289,7 +1495,9 @@ class WorldScene extends Phaser.Scene {
     const cone = this.aimCones[uiSide]
     cone.clear()
 
-    // Wash across the full spread first, so it sits behind the rays.
+    // Wash across the full theoretical spread — a general "this direction,
+    // this max reach" backdrop behind the individual rays below, which are
+    // what actually shows how far each gun can currently reach.
     const edgeLeft = { x: this.ship.x + Math.cos(baseAngle - CANNON_SPREAD_HALF_ANGLE) * range, y: this.ship.y + Math.sin(baseAngle - CANNON_SPREAD_HALF_ANGLE) * range }
     const edgeRight = { x: this.ship.x + Math.cos(baseAngle + CANNON_SPREAD_HALF_ANGLE) * range, y: this.ship.y + Math.sin(baseAngle + CANNON_SPREAD_HALF_ANGLE) * range }
     cone.fillStyle(0xf0c96b, 0.14)
@@ -1301,16 +1509,56 @@ class WorldScene extends Phaser.Scene {
     cone.fillPath()
 
     // One ray per real cannon — the actual "веер" (fan) of guns about to
-    // fire, same even spacing as spawnBroadsideVolley/handleFire use.
+    // fire, same even spacing as spawnBroadsideVolley/handleFire use. Each
+    // one stops independently at whatever it'd actually reach first — an
+    // island, another ship, or a port's safe zone (see
+    // rayObstructionDistance) — instead of always drawing at full range
+    // regardless of what's actually in the way.
     cone.lineStyle(1.5, 0xf0c96b, 0.75)
     cone.beginPath()
     for (let i = 0; i < count; i++) {
       const t = count === 1 ? 0 : i / (count - 1) - 0.5 // -0.5..0.5
       const angle = baseAngle + t * 2 * CANNON_SPREAD_HALF_ANGLE
+      const rayLen = this.rayObstructionDistance(this.ship.x, this.ship.y, angle, range)
       cone.moveTo(this.ship.x, this.ship.y)
-      cone.lineTo(this.ship.x + Math.cos(angle) * range, this.ship.y + Math.sin(angle) * range)
+      cone.lineTo(this.ship.x + Math.cos(angle) * rayLen, this.ship.y + Math.sin(angle) * rayLen)
     }
     cone.strokePath()
+  }
+
+  /**
+   * How far along a ray from (originX, originY) at `angle` before it hits
+   * whatever the aim preview should stop at, capped at maxRange — an
+   * island, another ship, or a port's safe zone (ports/ships aren't
+   * physically solid to a real cannonball, see tickCannonballs, but
+   * drawing the preview stopping there reads as "no point shooting past
+   * this" instead of implying a longer reach than actually matters).
+   */
+  rayObstructionDistance(originX, originY, angle, maxRange) {
+    const dx = Math.cos(angle)
+    const dy = Math.sin(angle)
+    let dist = maxRange
+
+    for (const sprite of this.otherShips.values()) {
+      const hit = rayCircleHit(originX, originY, dx, dy, sprite.x, sprite.y, AIM_RAY_SHIP_RADIUS)
+      if (hit !== null && hit < dist) dist = hit
+    }
+
+    for (const port of this.ports) {
+      const hit = rayCircleHit(originX, originY, dx, dy, port.x, port.y, PORT_ENTER_RANGE)
+      if (hit !== null && hit < dist) dist = hit
+    }
+
+    // Islands are irregular, not circles — no clean analytic shortcut, so
+    // this marches in short steps and stops at the first blocked sample
+    // instead (same idea WorldRoom.js's own pathClear uses server-side).
+    const steps = Math.ceil(dist / AIM_RAY_STEP)
+    for (let i = 1; i <= steps; i++) {
+      const d = Math.min(dist, i * AIM_RAY_STEP)
+      if (this.collidesWithIsland(originX + dx * d, originY + dy * d)) return d
+    }
+
+    return dist
   }
 
   /**
@@ -1367,6 +1615,43 @@ class WorldScene extends Phaser.Scene {
     const fillKey = fraction > 0.5 ? 'hp-bar-fill-good' : fraction > 0.25 ? 'hp-bar-fill-mid' : 'hp-bar-fill-bad'
     if (bar.fill.texture.key !== fillKey) bar.fill.setTexture(fillKey)
     bar.fill.setCrop(0, 0, HP_BAR_WIDTH * fraction, HP_BAR_HEIGHT)
+  }
+
+  /** Same left-anchored bg+fill pill as createHpBar, own ship only — see CARGO_BAR_Y_OFFSET's own comment for why nobody else's is ever drawn. */
+  createCargoBar(x, y) {
+    const bg = this.add.image(x, y, 'cargo-bar-bg').setOrigin(0, 0.5).setDepth(10)
+    const fill = this.add.image(x, y, 'cargo-bar-fill').setOrigin(0, 0.5).setDepth(11)
+    fill.setCrop(0, 0, HP_BAR_WIDTH, CARGO_BAR_HEIGHT)
+    return { bg, fill }
+  }
+
+  updateCargoBar(bar, shipX, shipY, weight, capacity) {
+    const barX = shipX - HP_BAR_WIDTH / 2
+    const barY = shipY + CARGO_BAR_Y_OFFSET
+    bar.bg.setPosition(barX, barY)
+    bar.fill.setPosition(barX, barY)
+    const fraction = capacity > 0 ? Phaser.Math.Clamp(weight / capacity, 0, 1) : 0
+    bar.fill.setCrop(0, 0, HP_BAR_WIDTH * fraction, CARGO_BAR_HEIGHT)
+  }
+
+  /**
+   * Absolute set — called from WorldPage.vue's refreshCargo() after a
+   * fresh api.getShip() (on world load, and whenever PortModal closes,
+   * since trading/buying a bigger hull/etc. all happen over plain Laravel
+   * calls the room never sees, same reasoning as refresh_ship). Cargo
+   * weight was never added to the Player schema itself — unlike hp, it's
+   * pure display, nothing server-authoritative here ever reads it, so a
+   * lazily-synced client-side number is enough; it didn't earn a permanent
+   * spot in every player's replicated state just for this bar.
+   */
+  setCargo(weight, capacity) {
+    this.cargoWeight = weight
+    this.cargoCapacity = capacity
+  }
+
+  /** Cheap incremental bump for a cargo-drop pickup (see onCargoClaimed) — the exact claimed amount is already known client-side, no need to round-trip a fresh api.getShip() just to add it in. */
+  addCargoWeight(delta) {
+    this.cargoWeight = Math.max(0, this.cargoWeight + delta)
   }
 
   checkNearPort() {
@@ -1485,12 +1770,31 @@ async function toggleInfo() {
 // silently handle here; if nothing was claimed, nothing is sent at all.
 function notifyCargoClaimed(gold, products) {
   const parts = []
+  let weightDelta = 0
   if (gold > 0) parts.push(`${gold} золота`)
   for (const [type, qty] of Object.entries(products || {})) {
-    if (qty > 0) parts.push(`${PRODUCT_NAMES[type] ?? type} ×${qty}`)
+    if (qty > 0) {
+      parts.push(`${PRODUCT_NAMES[type] ?? type} ×${qty}`)
+      weightDelta += qty * (PRODUCT_WEIGHTS[type] ?? 0)
+    }
   }
+  if (weightDelta > 0) game?.scene.getScene('world')?.addCargoWeight(weightDelta)
   if (parts.length === 0) return
   Notify.create({ type: 'positive', message: `Вы подобрали груз: ${parts.join(', ')}`, position: 'top' })
+}
+
+// Cargo weight/capacity aren't in the Player schema (see setCargo's own
+// comment in WorldScene) — fetched here whenever it could have changed:
+// once on world load, and again whenever PortModal closes (trading,
+// selling, or a bigger hull's higher capacity all happen over plain
+// Laravel calls, same reasoning as room.send('refresh_ship') right above).
+async function refreshCargo() {
+  try {
+    const { ship } = await api.getShip()
+    game?.scene.getScene('world')?.setCargo(ship.cargo_weight, ship.capacity)
+  } catch {
+    // Best-effort cosmetic sync — a failed fetch just leaves the bar at its last known fraction.
+  }
 }
 
 // Was a Phaser text tween floating over the ship — sat right where the
@@ -1579,6 +1883,7 @@ onMounted(async () => {
     onBackPress: () => router.push('/'),
     onFireBroadside: noteBroadsideFired,
   })
+  refreshCargo()
 })
 
 // Locks WorldScene's own movement+firing input for as long as PortModal is
@@ -1595,9 +1900,15 @@ onMounted(async () => {
 // keep showing your pre-repair HP bar, old hull, and un-upgraded cannons
 // until you fully disconnected and reconnected (which is exactly what used
 // to paper over this before Port became a modal that never leaves the room).
+// PortModal's own 'ship-changed' (below) is what actually fires this right
+// after each action — this close-time refresh is just a harmless backstop
+// for anything that changed but somehow didn't emit it.
 watch(activePortId, (id, prevId) => {
   game?.scene.getScene('world')?.setInputLocked(!!id)
-  if (!id && prevId) room.send('refresh_ship')
+  if (!id && prevId) {
+    room.send('refresh_ship')
+    refreshCargo()
+  }
 })
 
 onBeforeUnmount(() => {
