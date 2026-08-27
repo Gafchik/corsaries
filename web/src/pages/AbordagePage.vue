@@ -479,7 +479,7 @@ watch([attack, defend], () => nextTick(refreshItems), { deep: true })
   margin-bottom: 10px;
 }
 
-/* Plain :focus, not :focus-visible — see the same note in PortPage.vue. */
+/* Plain :focus, not :focus-visible — see the same note in PortModal.vue. */
 .abordage-page :focus {
   outline: 3px solid var(--c-gold-bright);
   outline-offset: 2px;

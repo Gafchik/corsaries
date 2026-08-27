@@ -25,6 +25,55 @@ class Ship extends Model
         return $this->hasMany(ShipSailor::class);
     }
 
+    public function cannons(): HasMany
+    {
+        return $this->hasMany(ShipCannon::class);
+    }
+
+    /**
+     * Creates whatever cannon slots this ship's current type should have
+     * but doesn't yet — new slots start at level 0 (a freshly bought hull's
+     * stock guns), existing slots (and their levels) are left untouched.
+     * Called on first ship creation and every shipyard purchase (see
+     * AuthController::ensureStarterShip, PortController::buyShip) — a
+     * downgrade to a smaller hull just leaves the extra slots orphaned
+     * rather than deleting upgrade progress a player paid real gold for.
+     */
+    public function ensureCannonSlots(): void
+    {
+        $existing = $this->cannons()->pluck('slot')->all();
+        $wanted = $this->stats()['cannon_count'];
+
+        for ($slot = 0; $slot < $wanted; $slot++) {
+            if (! in_array($slot, $existing, true)) {
+                ShipCannon::create(['ship_id' => $this->id, 'slot' => $slot, 'level' => 0]);
+            }
+        }
+    }
+
+    /** damage/range/speed/reload for one cannon at $level — see config/cannons.php's own comment for the calibration this is built to satisfy (reload deliberately isn't part of it — see that config's own note). */
+    public function cannonStatsAt(int $level): array
+    {
+        $base = config("cannons.base.{$this->type}");
+        $multiplier = 1 + config('cannons.level_bonus_fraction') * $level;
+        $reloadMultiplier = 1 - config('cannons.reload_level_bonus_fraction') * $level;
+
+        return [
+            'damage' => (int) round($base['damage'] * $multiplier),
+            'range' => (int) round($base['range'] * $multiplier),
+            'speed' => (int) round($base['speed'] * $multiplier),
+            'reload_ms' => (int) round(config('cannons.reload_base_ms') * $reloadMultiplier),
+        ];
+    }
+
+    /** Gold to go from $level to $level+1, or null once already at the cap. */
+    public function cannonUpgradeCost(int $level): ?int
+    {
+        $costs = config('cannons.level_cost');
+
+        return $costs[$level] ?? null;
+    }
+
     public function stats(): array
     {
         return config("ships.{$this->type}");

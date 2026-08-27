@@ -23,22 +23,40 @@
         gamepad A, the touch button) already does the same thing — this is
         just telling you it's available, not the only way in.
       -->
-      <div v-if="contextPrompt" class="context-prompt" @click="performAction">
+      <div v-if="contextPrompt && !activePortId" class="context-prompt" @click="performAction">
         <span class="context-prompt__text">{{ contextPrompt.text }}</span>
         <span class="context-prompt__hint">Действие</span>
       </div>
 
       <!-- Always visible (keyboard/gamepad players want to see this too, not
            just touch) — two reload rings for the broadsides. Doubles as the
-           touch fire buttons on a phone (pointerdown), and stays a clickable
-           mouse target everywhere else as a bonus, not a requirement. -->
-      <div class="broadside-hud">
-        <button class="broadside-ring" :style="broadsideRingStyle(leftReloadFraction)" @pointerdown.prevent="controls.touchPress('fireLeft')">
+           touch fire buttons on a phone: hold to preview the hit-zone cone,
+           release to fire (see fireLeft/fireRight hold-polling in
+           WorldScene.update). Stays a clickable mouse target everywhere else
+           as a bonus, not a requirement. Hidden while PortModal is open —
+           firing/aiming input is locked then anyway (see the activePortId
+           watch below), so a live ring here would just be a lie. -->
+      <div v-if="!activePortId" class="broadside-hud">
+        <button
+          class="broadside-ring"
+          :style="broadsideRingStyle(leftReloadFraction)"
+          @pointerdown.prevent="controls.touchHoldStart('fireLeft')"
+          @pointerup.prevent="controls.touchHoldEnd('fireLeft')"
+          @pointercancel.prevent="controls.touchHoldEnd('fireLeft')"
+          @pointerleave.prevent="controls.touchHoldEnd('fireLeft')"
+        >
           <span class="broadside-ring__inner">
             <svg viewBox="0 0 24 24" fill="none" :stroke="leftReloadFraction >= 1 ? 'var(--c-success)' : 'rgba(238,245,242,0.45)'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/></svg>
           </span>
         </button>
-        <button class="broadside-ring" :style="broadsideRingStyle(rightReloadFraction)" @pointerdown.prevent="controls.touchPress('fireRight')">
+        <button
+          class="broadside-ring"
+          :style="broadsideRingStyle(rightReloadFraction)"
+          @pointerdown.prevent="controls.touchHoldStart('fireRight')"
+          @pointerup.prevent="controls.touchHoldEnd('fireRight')"
+          @pointercancel.prevent="controls.touchHoldEnd('fireRight')"
+          @pointerleave.prevent="controls.touchHoldEnd('fireRight')"
+        >
           <span class="broadside-ring__inner">
             <svg viewBox="0 0 24 24" fill="none" :stroke="rightReloadFraction >= 1 ? 'var(--c-success)' : 'rgba(238,245,242,0.45)'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/></svg>
           </span>
@@ -49,18 +67,31 @@
            gets an on-screen stick + action button instead of relying on
            WASD/gamepad. Sits above the canvas, so a tap here never also
            reaches the canvas's own pointerdown-fires-cannon handler below. -->
-      <div v-if="showTouchControls" class="touch-controls">
+      <div v-if="showTouchControls && !activePortId" class="touch-controls">
         <TouchJoystick class="touch-controls__stick" />
         <button class="touch-btn" @pointerdown.prevent="controls.touchPress('action')">Действие</button>
       </div>
 
       <ShipInfoOverlay v-if="showInfo" :ship-info="shipInfo" :coins="coins" @close="showInfo = false" />
+
+      <!--
+        Opened straight over the world instead of navigating to a 'port/:id'
+        route — the realtime room (and the whole Phaser game) used to get
+        torn down and rejoined on every single port visit (see
+        onBeforeUnmount's room.leave()/game.destroy() below), which is
+        exactly the kind of churn that made the cargo-drop-vanishing bug
+        possible in the first place (see this.autoDispose in WorldRoom.js).
+        A modal just sits on top; nothing underneath disconnects. Player
+        input is locked for its duration (see the watch below) so you can't
+        sail off or fire while the shop's open.
+      -->
+      <PortModal v-if="activePortId" :key="activePortId" :port-id="activePortId" @close="activePortId = null" />
     </div>
   </q-page>
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
+import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Notify } from 'quasar'
 import Phaser from 'phaser'
@@ -70,6 +101,7 @@ import { api } from '@/services/api'
 import { controls, isPhone, onGamepadChange } from '@/services/controls'
 import ShipInfoOverlay from '@/components/ShipInfoOverlay.vue'
 import TouchJoystick from '@/components/TouchJoystick.vue'
+import PortModal from '@/components/PortModal.vue'
 
 const router = useRouter()
 const container = ref(null)
@@ -77,6 +109,10 @@ const nearPort = ref(null)
 const nearBot = ref(null)
 const nearHuman = ref(null)
 const showInfo = ref(false)
+// Which port's PortModal is open, if any — set by enterPort, cleared by the
+// modal's own 'close'. The watch further down locks/unlocks WorldScene's
+// own movement+firing input to match, so the two can never drift apart.
+const activePortId = ref(null)
 const shipInfo = ref(null)
 const coins = ref(0)
 
@@ -141,25 +177,45 @@ const SHIP_VISUAL_SCALE = {
 const MOVE_SEND_INTERVAL_MS = 100
 const OTHER_SHIP_LERP = 0.2 // fraction of remaining distance/angle closed per rendered frame
 
-// Keep in sync with CANNON_RANGE in realtime/src/rooms/WorldRoom.js — the
-// hit was already decided there the instant 'fire' arrived (no lag
-// compensation for a traveling shot in a networked game); this is purely
-// the visual of a ball crossing that same distance, closer in spirit to the
-// original's Cannonball._range than to the actual hit resolution.
-const CANNON_RANGE = 260
-const CANNONBALL_SPEED = 600 // px/s
-
-// Keep in sync with FIRE_COOLDOWN_MS in realtime/src/rooms/WorldRoom.js —
+// Keep in sync with RELOAD_BASE_MS in realtime/src/rooms/WorldRoom.js —
 // purely a predicted/optimistic display (see noteBroadsideFired below), the
 // server enforces the real cooldown independently and just ignores an early
-// 'fire' rather than telling the client to correct its guess.
+// 'fire' rather than telling the client to correct its guess. Reload is a
+// per-cannon-level upgrade now, so a player who's actually invested in it
+// reloads a little faster (up to 10%) than this constant assumes — the
+// ring can read "still charging" for up to ~90ms after the server would
+// already accept the next shot. Not worth plumbing the player's own
+// average cannon level here just to shave off a barely-perceptible sliver;
+// the server is what actually decides fire timing either way.
 const FIRE_COOLDOWN_MS = 900
+
+// Fallback cone length before the player's own first 'fired' broadcast has
+// arrived (see lastKnownRange in create()) — the boat's base range from
+// api/config/cannons.php, close enough for the very first aim-hold of a session.
+const DEFAULT_AIM_RANGE = 78
+
+// Keep in sync with SHIP_CANNON_COUNT in realtime/src/rooms/WorldRoom.js —
+// how many individual cannons fan out per broadside (half of each entry
+// here). Only used to size the aim-hold preview (see drawAimCone) before
+// this player's first real shot has confirmed anything with the server;
+// it's never trusted for actual hit resolution.
+const SHIP_CANNON_COUNT = {
+  boat: 6, schooner: 10, caravel: 14, brig: 16,
+  frigate: 20, galleon: 24, corvette: 18, battleship: 30,
+}
+
+// Keep in sync with CANNON_SPREAD_HALF_ANGLE in
+// realtime/src/rooms/WorldRoom.js — how far each individual gun in a
+// broadside fans out from dead-center, in radians. Purely cosmetic here
+// (see drawAimCone/spawnBroadsideVolley); the server resolves every ball's
+// real flight path independently and never reads this copy.
+const CANNON_SPREAD_HALF_ANGLE = 0.16
 
 // Keep in sync with CARGO_DROP_TTL_MS in realtime/src/rooms/WorldRoom.js —
 // purely cosmetic here (the server deletes the drop from state on its own
 // schedule regardless of what this draws), just needs to agree so the ring
 // hits empty around the same moment the crate actually disappears.
-const CARGO_DROP_TTL_MS = 60000
+const CARGO_DROP_TTL_MS = 120000
 
 // Must match SHORE_POINT_COUNT in realtime/src/worldgen.js — how many
 // boundary samples each synced island's `points` array carries.
@@ -245,6 +301,7 @@ class WorldScene extends Phaser.Scene {
     this.onNearBotChange = data.onNearBotChange
     this.onNearHumanChange = data.onNearHumanChange
     this.onCargoClaimed = data.onCargoClaimed
+    this.onActionRejected = data.onActionRejected
     this.onAbordageStarted = data.onAbordageStarted
     this.onActionPress = data.onActionPress
     this.onFireBroadside = data.onFireBroadside
@@ -518,43 +575,63 @@ class WorldScene extends Phaser.Scene {
     this.lastMoveSentAt = 0
     this.otherShips = new Map()
     this.cargoDropSprites = new Map() // dropId -> { crate, ring, x, y, spawnedAt }
-    this.activeCannonballs = new Map() // attackerId -> in-flight ball sprite
+    this.activeCannonballs = new Map() // `${attackerId}:${side}` -> array of in-flight ball sprites (a whole volley, see spawnBroadsideVolley)
     // Guards fireBroadside below — mashing fire mid-reload used to still
     // reset the HUD ring's animation (via onFireBroadside) even though no
     // ball actually flew, since the server silently drops the early 'fire'
     // but the client had no idea it was early and reset anyway.
     this.lastBroadsideFiredAt = { fireLeft: 0, fireRight: 0 }
 
+    // Hold-to-aim: press/hold a broadside input to preview its hit-zone
+    // cone, release to actually fire (see the per-frame polling in update()
+    // and the aim cones set up just below). lastKnownRange starts at the
+    // boat default and gets corrected the instant this player's own first
+    // 'fired' broadcast arrives (see setupNetworking) — close enough for
+    // the very first hold before that, and exact for every one after.
+    this.wasHeld = { fireLeft: false, fireRight: false }
+    this.lastKnownRange = { fireLeft: DEFAULT_AIM_RANGE, fireRight: DEFAULT_AIM_RANGE }
+    // Set by setInputLocked (see WorldPage.vue's activePortId watch) while
+    // PortModal is open — freezes movement/aiming/firing without tearing
+    // down the scene or leaving the room, just like standing still.
+    this.inputLocked = false
+    // Translucent hit-zone cones, one per broadside, drawn/cleared each
+    // frame in update() while that side is held. Minimap must never show
+    // these — same reasoning as every other screen-only HUD graphic.
+    this.aimCones = { fireLeft: this.add.graphics().setDepth(8), fireRight: this.add.graphics().setDepth(8) }
+    this.minimapCam?.ignore([this.aimCones.fireLeft, this.aimCones.fireRight])
+
     this.setupNetworking()
 
-    // Mouse buttons fire broadsides too — right hand naturally rests on the
-    // mouse while WASD (left hand) handles movement. This stays a fixed,
-    // non-rebindable convenience on top of the controls module below, not a
-    // replacement for it — everything here must also work with the mouse
-    // untouched (keyboard alone, or a gamepad). 'left'/'right' below are
-    // just the server's internal labels for the two broadside vectors —
-    // when the bow faces up-screen, the vector labeled 'right' actually
-    // points screen-left (verified against the working hit-detection math,
-    // not guessed), so the screen-left broadside (mouse left button) sends
-    // 'right' and the screen-right one (mouse right button) sends 'left'.
+    // Mouse buttons used to fire immediately on press; now they're just
+    // another held-input source polled each frame in update(), same as
+    // keyboard/gamepad/touch (see the fireLeft/fireRight hold-detection
+    // there) — pointerdown/up only need to be tracked, not acted on here.
+    // 'left'/'right' server-side are the internal labels for the two
+    // broadside vectors — when the bow faces up-screen, the vector labeled
+    // 'right' actually points screen-left (verified against the working
+    // hit-detection math, not guessed), so the screen-left broadside
+    // (mouse left button) sends 'right' and the screen-right one (mouse
+    // right button) sends 'left'. See broadsideDirection() for the same
+    // mapping applied to the cone's drawn direction.
     this.input.mouse?.disableContextMenu()
-    this.input.on('pointerdown', (pointer) => {
-      if (pointer.leftButtonDown()) this.fireBroadside('fireLeft')
-      else if (pointer.rightButtonDown()) this.fireBroadside('fireRight')
-    })
 
-    // Rebindable keyboard/gamepad actions (see services/controls.js) — the
-    // same fireLeft/fireRight/action/inventory actions work from either
-    // device, whatever the player has bound them to.
+    // Rebindable keyboard/gamepad actions (see services/controls.js) —
+    // fireLeft/fireRight are now polled by held-state in update() instead
+    // of onPress (see gamepadButtonHeld/controls.isDown there); action/
+    // inventory/back stay discrete press events, unchanged.
+    // Guarded by inputLocked too, not just the per-frame movement/firing —
+    // PortModal has its OWN 'back'/'inventory' listeners (see
+    // PortModal.vue) that are meant to close/open ITS overlay while it's
+    // open; without this guard, the exact same button press would ALSO hit
+    // these still-live World listeners underneath (onBackPress leaves the
+    // world entirely — very much not what closing a shop dialog should do).
     this.controlUnsubs = [
-      controls.onPress('fireLeft', () => this.fireBroadside('fireLeft')),
-      controls.onPress('fireRight', () => this.fireBroadside('fireRight')),
-      controls.onPress('action', () => this.onActionPress?.()),
-      controls.onPress('inventory', () => this.onInventoryPress?.()),
+      controls.onPress('action', () => { if (!this.inputLocked) this.onActionPress?.() }),
+      controls.onPress('inventory', () => { if (!this.inputLocked) this.onInventoryPress?.() }),
       // Circle/B on a gamepad, Escape on keyboard — same universal "back"
       // convention as every other screen (Port, Abordage, Loot, Controls),
       // just meaning "leave the world" here instead of "close this dialog".
-      controls.onPress('back', () => this.onBackPress?.()),
+      controls.onPress('back', () => { if (!this.inputLocked) this.onBackPress?.() }),
     ]
     // 'shutdown' fires on scene.stop(); 'destroy' is what actually fires
     // when the whole Game is torn down (see onBeforeUnmount's
@@ -574,6 +651,39 @@ class WorldScene extends Phaser.Scene {
     // they're registered through this proxy. See colyseus.js docs / DECK
     // notes: getStateCallbacks(room), then $(room.state).<field>.onAdd(...).
     const $ = getStateCallbacks(this.room)
+
+    // this.meRef.hp is already read fresh every frame (see updateHpBar in
+    // update()), so a repair/damage patch alone needs no extra wiring here.
+    // maxHp/shipType aren't re-read every frame though — they're cached
+    // once, into myMaxHp/mySpeed/the ship sprite's own texture, back in
+    // create() — so buying a new hull (or repairing, which changes hp but
+    // not these) needs this to actually show up: the HP bar's own
+    // denominator, movement speed, and the sprite itself would otherwise
+    // stay stuck on whatever ship you were sailing when the scene first
+    // loaded. See 'refresh_ship' in WorldRoom.js for what pushes the
+    // schema patch that triggers this in the first place.
+    $(this.meRef).onChange(() => {
+      this.myMaxHp = this.meRef.maxHp
+      this.mySpeed = SHIP_SPEED * (SHIP_SPEED_MULT[this.meRef.shipType] ?? 1)
+      // setVelocity below is capped by the Arcade body's own maxVelocity —
+      // set once from the OLD mySpeed back in create() and never touched
+      // since. Recomputing mySpeed alone silently did nothing: a faster
+      // new hull's velocity just got clamped straight back down to the
+      // old ceiling, which is exactly why the ship kept sailing at its
+      // previous speed after buying a new one.
+      this.ship.setMaxVelocity(this.mySpeed)
+      const textureKey = `ship-${this.meRef.shipType}`
+      if (this.ship.texture.key !== textureKey) {
+        this.ship.setTexture(textureKey)
+        this.ship.setScale(SHIP_VISUAL_SCALE[this.meRef.shipType] ?? 0.5)
+        // Same hull-not-sail sizing create() used, re-applied against the
+        // NEW texture's own raw frame size — left at the old ship's
+        // dimensions otherwise (a Boat's tiny hitbox on a Battleship's
+        // hull, or the reverse), same staleness bug as maxVelocity above.
+        this.ship.body.setSize(this.ship.width * 0.6, this.ship.height * 0.6)
+        this.myNameText.setText(shipLabel(this.meRef.firstName ?? 'Вы', this.meRef.shipType))
+      }
+    })
 
     $(this.room.state).players.onAdd((player, sessionId) => {
       if (sessionId === mySessionId) return
@@ -643,10 +753,26 @@ class WorldScene extends Phaser.Scene {
       this.cargoDropSprites.delete(id)
     })
 
-    this.room.onMessage('fired', ({ attackerId, side }) => this.spawnCannonball(attackerId, side))
+    this.room.onMessage('fired', ({ attackerId, side, count, range, speed }) => {
+      this.spawnBroadsideVolley(attackerId, side, count, range, speed)
+      // Corrects the aim cone's length to this player's real, possibly
+      // upgraded, cannon range the moment it's actually known — see
+      // lastKnownRange's setup in create(). Same server-side->UI-side
+      // inversion as everywhere else ('right' broadcasts are the fireLeft
+      // broadside, 'left' broadcasts are fireRight).
+      if (attackerId === this.room.sessionId) {
+        this.lastKnownRange[side === 'right' ? 'fireLeft' : 'fireRight'] = range
+      }
+    })
 
     this.room.onMessage('hit', ({ attackerId, targetId, damage, hp }) => {
-      this.stopCannonball(attackerId) // found its mark — don't let the visual keep flying past it
+      // A broadside is now several independent balls (see
+      // spawnBroadsideVolley) — this message is about exactly ONE of them
+      // finding its mark, so only the visual ball nearest the target gets
+      // cut short; the rest of the volley keeps flying toward its own miss.
+      const targetX = targetId === mySessionId ? this.ship.x : this.otherShips.get(targetId)?.x
+      const targetY = targetId === mySessionId ? this.ship.y : this.otherShips.get(targetId)?.y
+      if (targetX !== undefined) this.stopNearestCannonball(attackerId, targetX, targetY)
       if (targetId === mySessionId) {
         this.hpText.setText(`HP: ${hp}/${this.myMaxHp}`)
         this.spawnDamageNumber(this.ship.x, this.ship.y, damage)
@@ -662,8 +788,10 @@ class WorldScene extends Phaser.Scene {
     // The server now actually stops a ball at the shoreline (see
     // tickCannonballs in WorldRoom.js) instead of letting shots pass through
     // islands — without this the client's blind visual tween would keep
-    // flying straight through the land it just got blocked by.
-    this.room.onMessage('cannonball_blocked', ({ attackerId }) => this.stopCannonball(attackerId))
+    // flying straight through the land it just got blocked by. Only the one
+    // ball that actually hit the shore at (x, y) stops — same reasoning as
+    // 'hit' above, now that a volley is several independent balls.
+    this.room.onMessage('cannonball_blocked', ({ attackerId, x, y }) => this.stopNearestCannonball(attackerId, x, y))
 
     this.room.onMessage('sunk', ({ targetId, respawnHp, respawnX, respawnY }) => {
       if (targetId !== mySessionId) return
@@ -694,10 +822,19 @@ class WorldScene extends Phaser.Scene {
     // the round-trip to the server is enough to have sailed back out of
     // range by the time this resolves. Used to just do nothing, which read
     // as the feature being silently broken; this at least says why.
-    const REJECTION_TEXT = { in_port_zone: 'В зоне порта нельзя', out_of_range: 'Слишком далеко', server_error: 'Не удалось начать абордаж' }
+    const ABORDAGE_REJECTION_TEXT = { in_port_zone: 'В зоне порта нельзя', out_of_range: 'Слишком далеко', server_error: 'Не удалось начать абордаж' }
     this.room.onMessage('abordage_rejected', ({ reason }) => {
-      const toast = this.add.text(this.ship.x, this.ship.y - 40, REJECTION_TEXT[reason] ?? 'Абордаж не удался', { fontSize: '13px', color: '#ff9d94' }).setOrigin(0.5)
-      this.tweens.add({ targets: toast, y: toast.y - 24, alpha: 0, duration: 1100, onComplete: () => toast.destroy() })
+      this.onActionRejected?.(ABORDAGE_REJECTION_TEXT[reason] ?? 'Абордаж не удался')
+    })
+
+    // Backstop for handleFire's own isNearAnyPort check in WorldRoom.js —
+    // updateAiming already stops a hold-to-aim release from ever sending
+    // 'fire' while this client already knows it's docked (see
+    // this.currentNearPortId there), so this normally never fires. Kept as
+    // a real server round trip anyway so a stale/wrong client-side guess
+    // still gets told "no" instead of silently eating the shot.
+    this.room.onMessage('fire_rejected', ({ reason }) => {
+      if (reason === 'in_port_zone') this.onActionRejected?.('Нельзя стрелять на территории порта')
     })
   }
 
@@ -705,44 +842,79 @@ class WorldScene extends Phaser.Scene {
    * A blind visual guess, started the instant 'fire' arrives for low-latency
    * feedback — the real resolution now happens server-side over the flight
    * (see tickCannonballs in WorldRoom.js), which is what actually decides
-   * hit/miss/blocked and can arrive before this tween finishes. When it
-   * does, 'hit' or 'cannonball_blocked' calls stopCannonball() to cut this
-   * tween short instead of letting it visibly fly past what stopped it.
+   * hit/miss/blocked and can arrive before any of these tweens finish. When
+   * it does, 'hit'/'cannonball_blocked' calls stopNearestCannonball() to cut
+   * the one ball that actually resolved short, instead of letting it
+   * visibly fly past what stopped it — the other balls in this same volley
+   * are unaffected and keep flying toward their own individual range/miss.
+   *
+   * One shot is now `count` separate balls (one per real cannon on that
+   * side, see broadsideCannons in WorldRoom.js), fanned evenly across
+   * CANNON_SPREAD_HALF_ANGLE exactly like the server just did — this only
+   * needs the aggregate range/speed the server sends, not each individual
+   * cannon's exact numbers, since the actual hit/miss and damage are
+   * already fully decided server-side by the time this plays.
    */
-  spawnCannonball(attackerId, side) {
+  spawnBroadsideVolley(attackerId, side, count, range, speed) {
     const attacker = this.room.state.players.get(attackerId)
     if (!attacker) return
 
     const fx = Math.sin(attacker.rotation)
     const fy = -Math.cos(attacker.rotation)
     const dir = side === 'right' ? { x: fy, y: -fx } : { x: -fy, y: fx }
+    const baseAngle = Math.atan2(dir.y, dir.x)
 
     const key = `${attackerId}:${side}`
-    this.activeCannonballs.get(key)?.destroy()
+    // A fresh volley firing before the previous one's balls have all
+    // resolved (fast reload) doesn't cut those short — they're still
+    // legitimately in flight — just stop tracking them under this key so
+    // this volley's own list isn't polluted with stale entries.
+    this.activeCannonballs.set(key, [])
+    const list = this.activeCannonballs.get(key)
 
-    const ball = this.add.sprite(attacker.x, attacker.y, 'cannonball')
-    this.activeCannonballs.set(key, ball)
-    this.tweens.add({
-      targets: ball,
-      x: attacker.x + dir.x * CANNON_RANGE,
-      y: attacker.y + dir.y * CANNON_RANGE,
-      duration: (CANNON_RANGE / CANNONBALL_SPEED) * 1000,
-      onComplete: () => {
-        ball.destroy()
-        if (this.activeCannonballs.get(key) === ball) this.activeCannonballs.delete(key)
-      },
-    })
+    for (let i = 0; i < count; i++) {
+      const t = count === 1 ? 0 : i / (count - 1) - 0.5 // -0.5..0.5
+      const angle = baseAngle + t * 2 * CANNON_SPREAD_HALF_ANGLE
+      const bx = Math.cos(angle)
+      const by = Math.sin(angle)
+
+      const ball = this.add.sprite(attacker.x, attacker.y, 'cannonball')
+      list.push(ball)
+      this.tweens.add({
+        targets: ball,
+        x: attacker.x + bx * range,
+        y: attacker.y + by * range,
+        duration: (range / speed) * 1000,
+        onComplete: () => {
+          ball.destroy()
+          const idx = list.indexOf(ball)
+          if (idx !== -1) list.splice(idx, 1)
+        },
+      })
+    }
   }
 
-  stopCannonball(attackerId) {
+  /** Stops whichever in-flight ball (across both of this attacker's sides) is currently closest to (x, y) — the one 'hit'/'cannonball_blocked' just said resolved there. Leaves every other ball in the volley flying. */
+  stopNearestCannonball(attackerId, x, y) {
+    let closest = null
+    let closestList = null
+    let closestDist = Infinity
     for (const side of ['left', 'right']) {
-      const key = `${attackerId}:${side}`
-      const ball = this.activeCannonballs.get(key)
-      if (!ball) continue
-      this.tweens.killTweensOf(ball)
-      ball.destroy()
-      this.activeCannonballs.delete(key)
+      const list = this.activeCannonballs.get(`${attackerId}:${side}`)
+      if (!list) continue
+      for (const ball of list) {
+        const dist = Math.hypot(ball.x - x, ball.y - y)
+        if (dist < closestDist) {
+          closestDist = dist
+          closest = ball
+          closestList = list
+        }
+      }
     }
+    if (!closest) return
+    this.tweens.killTweensOf(closest)
+    closest.destroy()
+    closestList.splice(closestList.indexOf(closest), 1)
   }
 
   /**
@@ -795,21 +967,35 @@ class WorldScene extends Phaser.Scene {
       this.lastGoodY = this.ship.y
     }
 
-    const move = controls.getMoveVector()
-    let vx = move.x
-    let vy = move.y
+    // PortModal open (see setInputLocked) — the ship just sits exactly
+    // where it was when the modal opened. Movement, the network 'move'
+    // send, and firing/aiming all skip entirely; other ships, cargo drops,
+    // camera, and HUD text below keep updating normally underneath —
+    // nothing else about the world pauses just because your menu is open.
+    if (!this.inputLocked) {
+      const move = controls.getMoveVector()
+      let vx = move.x
+      let vy = move.y
 
-    if (vx !== 0 || vy !== 0) {
-      const len = Math.hypot(vx, vy)
-      this.ship.setVelocity((vx / len) * this.mySpeed, (vy / len) * this.mySpeed)
-      this.ship.setRotation(Math.atan2(vy, vx) + Math.PI / 2)
-    } else {
-      this.ship.setVelocity(0, 0)
-    }
+      if (vx !== 0 || vy !== 0) {
+        const len = Math.hypot(vx, vy)
+        this.ship.setVelocity((vx / len) * this.mySpeed, (vy / len) * this.mySpeed)
+        this.ship.setRotation(Math.atan2(vy, vx) + Math.PI / 2)
+      } else {
+        this.ship.setVelocity(0, 0)
+      }
 
-    if (time - this.lastMoveSentAt > MOVE_SEND_INTERVAL_MS) {
-      this.lastMoveSentAt = time
-      this.room.send('move', { x: this.ship.x, y: this.ship.y, rotation: this.ship.rotation })
+      if (time - this.lastMoveSentAt > MOVE_SEND_INTERVAL_MS) {
+        this.lastMoveSentAt = time
+        this.room.send('move', { x: this.ship.x, y: this.ship.y, rotation: this.ship.rotation })
+      }
+
+      // Ahead of updateAiming below — it reads this.currentNearPortId to
+      // decide whether firing is even possible this frame (see
+      // updateAiming's own comment), so it needs this frame's fresh result,
+      // not last frame's.
+      this.checkNearPort()
+      this.updateAiming()
     }
 
     for (const sprite of this.otherShips.values()) {
@@ -830,7 +1016,6 @@ class WorldScene extends Phaser.Scene {
     this.myNameCard.setPosition(this.ship.x, this.ship.y + this.myNameCard.yOffset)
     this.updateHpBar(this.myHpBar, this.ship.x, this.ship.y, this.meRef?.hp ?? this.myMaxHp, this.myMaxHp)
 
-    this.checkNearPort()
     this.checkNearBot()
     this.checkNearHuman()
 
@@ -1002,6 +1187,132 @@ class WorldScene extends Phaser.Scene {
     this.onFireBroadside?.(uiSide)
   }
 
+  /** Is a gamepad currently holding down whatever button this action is bound to — same bindings.gamepad lookup controls.js's own press-edge polling uses, just read as a live state instead of an edge. */
+  gamepadButtonHeld(action) {
+    const pad = controls.firstGamepad()
+    if (!pad) return false
+    const btnIndex = controls.bindings.gamepad[action]
+    return !!pad.buttons[btnIndex]?.pressed
+  }
+
+  /**
+   * Screen-space unit vector the cone/cannonball for this broadside points
+   * along — identical math to spawnCannonball's dir (kept in sync
+   * deliberately, not shared, since spawnCannonball works off a server
+   * 'side' label while this works off the UI-facing action name).
+   */
+  broadsideDirection(uiSide) {
+    const fx = Math.sin(this.ship.rotation)
+    const fy = -Math.cos(this.ship.rotation)
+    // uiSide 'fireLeft' sends server side 'right' (see fireBroadside) — same
+    // inversion applied here so the cone points the same way the ball flies.
+    return uiSide === 'fireLeft' ? { x: fy, y: -fx } : { x: -fy, y: fx }
+  }
+
+  /**
+   * Hold-to-aim polling, run every frame from update(). A broadside input
+   * counts as "held" if ANY input method says so (only one is ever actually
+   * in use at a time per player, but all are always polled so switching
+   * devices mid-session just works). On the release edge the shot actually
+   * fires — reuses fireBroadside's own cooldown guard, so holding past a
+   * ready reload and releasing early doesn't bypass it.
+   *
+   * Firing is blocked in port territory (see isNearAnyPort in WorldRoom.js)
+   * — this.currentNearPortId (set by checkNearPort, run just before this
+   * every frame) is this client's own copy of that same check. While
+   * docked, holding never draws a cone (there'd be nothing honest to show —
+   * the server will refuse the shot regardless of where it's aimed), and
+   * releasing shows a toast instead of actually firing, so mashing the
+   * button in port never sends a single 'fire' the server would've had to
+   * silently drop, and the reload ring never fakes a shot that didn't
+   * happen (see fireBroadside's own note on that exact desync).
+   */
+  updateAiming() {
+    const inPort = this.currentNearPortId !== null
+    for (const uiSide of ['fireLeft', 'fireRight']) {
+      const held =
+        controls.isDown(uiSide) ||
+        this.gamepadButtonHeld(uiSide) ||
+        controls.isTouchHeld(uiSide) ||
+        (uiSide === 'fireLeft' ? this.input.activePointer.leftButtonDown() : this.input.activePointer.rightButtonDown())
+
+      if (held && !inPort) {
+        this.drawAimCone(uiSide)
+      } else {
+        this.aimCones[uiSide].clear()
+      }
+
+      if (!held && this.wasHeld[uiSide]) {
+        if (inPort) this.onActionRejected?.('Нельзя стрелять на территории порта')
+        else this.fireBroadside(uiSide)
+      }
+      this.wasHeld[uiSide] = held
+    }
+  }
+
+  /**
+   * Called from WorldPage.vue's activePortId watch — true while PortModal
+   * is open. Resets wasHeld on lock so a fire input that was mid-press the
+   * instant the modal opened doesn't read as a "release" (and fire) the
+   * moment it's unlocked again; movement/aiming/firing themselves are
+   * skipped in update() while this is true (see the inputLocked check
+   * there), this just handles the immediate visual cleanup.
+   */
+  setInputLocked(locked) {
+    this.inputLocked = locked
+    if (!locked) return
+    this.ship.setVelocity(0, 0)
+    for (const uiSide of ['fireLeft', 'fireRight']) {
+      this.aimCones[uiSide].clear()
+      this.wasHeld[uiSide] = false
+    }
+  }
+
+  /**
+   * Redraws one broadside's aim preview for the current frame — cleared and
+   * redrawn every frame it's held since the ship (its origin and facing)
+   * keeps moving. Shows exactly what's about to fire: a thin ray per
+   * individual cannon on that side (this ship's real gun count — see
+   * SHIP_CANNON_COUNT), fanned across the same CANNON_SPREAD_HALF_ANGLE the
+   * server actually fires with, each as long as the last known real range
+   * (see lastKnownRange), plus a faint wash across the whole spread so the
+   * covered zone still reads at a glance even with a lot of thin rays.
+   */
+  drawAimCone(uiSide) {
+    const dir = this.broadsideDirection(uiSide)
+    const baseAngle = Math.atan2(dir.y, dir.x)
+    const range = this.lastKnownRange[uiSide]
+    const shipType = this.meRef?.shipType ?? 'boat'
+    const totalCannons = SHIP_CANNON_COUNT[shipType] ?? SHIP_CANNON_COUNT.boat
+    const count = Math.max(1, Math.floor(totalCannons / 2))
+
+    const cone = this.aimCones[uiSide]
+    cone.clear()
+
+    // Wash across the full spread first, so it sits behind the rays.
+    const edgeLeft = { x: this.ship.x + Math.cos(baseAngle - CANNON_SPREAD_HALF_ANGLE) * range, y: this.ship.y + Math.sin(baseAngle - CANNON_SPREAD_HALF_ANGLE) * range }
+    const edgeRight = { x: this.ship.x + Math.cos(baseAngle + CANNON_SPREAD_HALF_ANGLE) * range, y: this.ship.y + Math.sin(baseAngle + CANNON_SPREAD_HALF_ANGLE) * range }
+    cone.fillStyle(0xf0c96b, 0.14)
+    cone.beginPath()
+    cone.moveTo(this.ship.x, this.ship.y)
+    cone.lineTo(edgeLeft.x, edgeLeft.y)
+    cone.lineTo(edgeRight.x, edgeRight.y)
+    cone.closePath()
+    cone.fillPath()
+
+    // One ray per real cannon — the actual "веер" (fan) of guns about to
+    // fire, same even spacing as spawnBroadsideVolley/handleFire use.
+    cone.lineStyle(1.5, 0xf0c96b, 0.75)
+    cone.beginPath()
+    for (let i = 0; i < count; i++) {
+      const t = count === 1 ? 0 : i / (count - 1) - 0.5 // -0.5..0.5
+      const angle = baseAngle + t * 2 * CANNON_SPREAD_HALF_ANGLE
+      cone.moveTo(this.ship.x, this.ship.y)
+      cone.lineTo(this.ship.x + Math.cos(angle) * range, this.ship.y + Math.sin(angle) * range)
+    }
+    cone.strokePath()
+  }
+
   /**
    * Dark rounded card behind a ship's name + HP bar, drawn in LOCAL space
    * around (0,0) — position it like any other game object with
@@ -1103,8 +1414,38 @@ class WorldScene extends Phaser.Scene {
   }
 }
 
-function enterPort() {
-  if (nearPort.value) router.push(`/port/${nearPort.value.id}`)
+// Laravel's port endpoints (PortController/GunsmithController) check this
+// player's x/y straight from the `ships` table, which is normally only as
+// fresh as the last AUTOSAVE_INTERVAL_MS(10s) tick — the old routed
+// '/port/:id' page got a free fresh save for this exact reason (leaving the
+// room to navigate there triggered WorldRoom's own onLeave save). A port
+// visit no longer leaves the room at all (see PortModal's own comment), so
+// this explicitly asks the server to save first and waits for its ack
+// before opening the modal — otherwise a player who just arrived could get
+// wrongly told they're "not at this port" for up to 10 seconds. Bounded by
+// a timeout so a lost ack still opens the modal rather than doing nothing;
+// worst case Laravel's own proximity check rejects it and the modal closes
+// itself the same way it always has for a stale/invalid open.
+function waitForPositionSaved() {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      unsub()
+      resolve()
+    }
+    const unsub = room.onMessage('position_saved', finish)
+    room.send('save_position')
+    setTimeout(finish, 1500)
+  })
+}
+
+async function enterPort() {
+  if (!nearPort.value) return
+  const portId = nearPort.value.id
+  await waitForPositionSaved()
+  activePortId.value = portId
 }
 
 function enterAbordage() {
@@ -1150,6 +1491,15 @@ function notifyCargoClaimed(gold, products) {
   }
   if (parts.length === 0) return
   Notify.create({ type: 'positive', message: `Вы подобрали груз: ${parts.join(', ')}`, position: 'top' })
+}
+
+// Was a Phaser text tween floating over the ship — sat right where the
+// ship's own name plate + HP bar are drawn (see createNameCard/updateHpBar
+// in WorldScene, both depth 9-11), so at the default depth it got hidden
+// behind them. A real Quasar notification lives in its own DOM layer above
+// the canvas entirely, so it can never be covered by anything drawn in it.
+function notifyActionRejected(message) {
+  Notify.create({ type: 'negative', message, position: 'top' })
 }
 
 function performAction() {
@@ -1216,12 +1566,32 @@ onMounted(async () => {
     onNearBotChange: (bot) => { nearBot.value = bot },
     onNearHumanChange: (human) => { nearHuman.value = human },
     onCargoClaimed: notifyCargoClaimed,
+    onActionRejected: notifyActionRejected,
     onAbordageStarted: (abordageId) => { router.push(`/abordage/${abordageId}`) },
     onActionPress: performAction,
     onInventoryPress: toggleInfo,
     onBackPress: () => router.push('/'),
     onFireBroadside: noteBroadsideFired,
   })
+})
+
+// Locks WorldScene's own movement+firing input for as long as PortModal is
+// open (see setInputLocked there) — without this, WASD/gamepad/touch input
+// still reaches the scene underneath a modal that visually covers it,
+// letting a player sail off or fire mid-purchase. Symmetric by construction:
+// whatever opens/closes activePortId (enterPort, the modal's own 'close')
+// automatically locks/unlocks, so the two can never end up out of sync.
+//
+// Closing also tells the room to refresh this player's hp/shipType/cannon
+// levels from the DB (see 'refresh_ship' in WorldRoom.js) — repairing,
+// buying a new hull, or upgrading a cannon all happen over plain Laravel
+// HTTP calls the realtime room never sees, so without this the world would
+// keep showing your pre-repair HP bar, old hull, and un-upgraded cannons
+// until you fully disconnected and reconnected (which is exactly what used
+// to paper over this before Port became a modal that never leaves the room).
+watch(activePortId, (id, prevId) => {
+  game?.scene.getScene('world')?.setInputLocked(!!id)
+  if (!id && prevId) room.send('refresh_ship')
 })
 
 onBeforeUnmount(() => {

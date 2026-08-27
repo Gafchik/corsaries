@@ -1,6 +1,6 @@
 // Keyboard/gamepad focus navigation for plain Vue UI screens (port, etc.) —
-// the naval world has its own Phaser-side input handling, but a page like
-// PortPage is just DOM buttons, and neither a keyboard-only player nor a
+// the naval world has its own Phaser-side input handling, but a screen like
+// PortModal is just DOM buttons, and neither a keyboard-only player nor a
 // gamepad has any way to reach them without this. Reuses the same
 // moveUp/moveDown/moveLeft/moveRight/action binds from services/controls.js:
 // same physical keys as ship movement, different meaning in this context

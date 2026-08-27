@@ -3,6 +3,7 @@
 use App\Http\Controllers\AbordageController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ControlsController;
+use App\Http\Controllers\GunsmithController;
 use App\Http\Controllers\LootController;
 use App\Http\Controllers\PortController;
 use App\Http\Controllers\ShipController;
@@ -39,6 +40,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/ports/{port}/shipyard', [PortController::class, 'buyShip']);
     Route::post('/ports/{port}/tavern', [PortController::class, 'tavern']);
     Route::post('/ports/{port}/repair', [PortController::class, 'repair']);
+    Route::get('/ports/{port}/cannons', [GunsmithController::class, 'index']);
+    Route::post('/ports/{port}/cannons/{slot}/upgrade', [GunsmithController::class, 'upgrade']);
 
     Route::post('/abordage/pve', [AbordageController::class, 'startPve']);
     Route::post('/abordage/pvp', [AbordageController::class, 'startPvp']);

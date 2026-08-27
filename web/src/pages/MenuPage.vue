@@ -145,7 +145,7 @@ useMenuNav(menuRef, { watchSource: showControlsEntry })
 .menu-btn__desc { font-size: 12px; color: var(--c-ink-faint); margin-top: 2px; }
 .menu-btn--primary .menu-btn__desc { color: rgba(44, 28, 5, 0.7); }
 
-/* Plain :focus, not :focus-visible — see the same note in PortPage.vue. */
+/* Plain :focus, not :focus-visible — see the same note in PortModal.vue. */
 .menu-page :focus {
   outline: 3px solid var(--c-gold-bright);
   outline-offset: 2px;

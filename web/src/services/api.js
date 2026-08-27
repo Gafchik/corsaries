@@ -86,6 +86,9 @@ export const api = {
   // amount is HP, not gold — the server derives cost from its own price
   // (see PortController::repair), this is just "how much to buy back".
   repair: (portId, amount) => request(`/ports/${portId}/repair`, { method: 'POST', body: { amount } }),
+  // gunsmith (per-cannon upgrades — see GunsmithController)
+  getCannons: (portId) => request(`/ports/${portId}/cannons`),
+  upgradeCannon: (portId, slot) => request(`/ports/${portId}/cannons/${slot}/upgrade`, { method: 'POST' }),
 
   // abordage
   startAbordagePve: (botShipType) => request('/abordage/pve', { method: 'POST', body: { bot_ship_type: botShipType } }),

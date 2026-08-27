@@ -1,5 +1,5 @@
 <template>
-  <q-page class="port-page">
+  <div class="port-modal" @click.self="close">
     <div v-if="loading" class="text-center q-mt-xl">Загрузка порта...</div>
 
     <div v-else ref="pageRef" class="sheet">
@@ -12,7 +12,7 @@
       -->
       <div class="sheet__top">
         <div class="port-hero">
-          <button class="leave-btn" @click="$router.push('/world')">
+          <button class="leave-btn" @click="close">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15,4 7,12 15,20"/></svg>
             Уплыть
           </button>
@@ -115,24 +115,51 @@
             {{ missingHp <= 0 ? 'Корабль цел' : `Починить ${repairAmount} HP — ${repairAmount * repairPricePerHp} зол` }}
           </button>
         </div>
+
+        <!-- Оружейник -->
+        <div v-if="tab === 'gunsmith'" class="panel panel--gunsmith">
+          <div class="row__sub">Каждая пушка качается отдельно — урон/дальность/скорость ядра растут вместе</div>
+          <div class="cannon-grid">
+            <div v-for="c in cannons" :key="c.slot" class="cannon-card" :class="{ 'cannon-card--maxed': c.upgrade_cost === null }">
+              <svg class="cannon-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/></svg>
+              <div class="cannon-card__title">Пушка {{ c.slot + 1 }}</div>
+              <div class="cannon-card__level">ур. {{ c.level }}/{{ c.max_level }}</div>
+              <div class="cannon-card__stats">{{ c.stats.damage }} урон · {{ c.stats.range }} дальн. · {{ c.stats.speed }} ск. · {{ (c.stats.reload_ms / 1000).toFixed(2) }}с перезар.</div>
+              <button
+                v-if="c.upgrade_cost !== null"
+                class="mini-btn cannon-card__btn"
+                :disabled="c.upgrade_cost > coins"
+                @click="upgradeCannon(c.slot)"
+              >
+                Улучшить — {{ c.upgrade_cost }} зол
+              </button>
+              <div v-else class="cannon-card__maxed-badge">Максимум</div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
     <ShipInfoOverlay v-if="showInfo" :ship-info="ship" :coins="coins" @close="showInfo = false" />
-  </q-page>
+  </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { Notify } from 'quasar'
 import { api } from '@/services/api'
 import { useMenuNav } from '@/composables/useMenuNav'
 import { controls } from '@/services/controls'
 import ShipInfoOverlay from '@/components/ShipInfoOverlay.vue'
 
-const route = useRoute()
-const router = useRouter()
-const portId = route.params.id
+const props = defineProps({
+  portId: { type: [String, Number], required: true },
+})
+const emit = defineEmits(['close'])
+function close() {
+  emit('close')
+}
+
 const pageRef = ref(null)
 
 const loading = ref(true)
@@ -144,6 +171,7 @@ const tavern = ref([])
 const repairPricePerHp = ref(1)
 const ship = ref(null)
 const coins = ref(0)
+const cannons = ref([])
 const tab = ref('market')
 const quantities = reactive({})
 const showInfo = ref(false)
@@ -161,6 +189,7 @@ const tabs = [
   { key: 'shipyard', label: 'Верфь', icon: '<polygon points="3,10 9,4 13,8 7,14"/><line x1="6" y1="13" x2="12" y2="21"/>' },
   { key: 'tavern', label: 'Таверна', icon: '<rect x="5" y="8" width="10" height="11" rx="1"/><path d="M15 10 h3 a3 3 0 0 1 0 6 h-3"/>' },
   { key: 'repair', label: 'Мастерская', icon: '<path d="M8.5 6.5a3 3 0 1 0 4.24 4.24"/><line x1="11.5" y1="9.5" x2="18" y2="16"/><path d="M16 14l3.5 3.5a2 2 0 1 1-2.83 2.83L13 17"/>' },
+  { key: 'gunsmith', label: 'Оружейник', icon: '<rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/>' },
 ]
 
 // Товары рынка (см. api/config/products.php) — по одной узнаваемой пиктограмме
@@ -182,7 +211,7 @@ function productIcon(type) {
 }
 
 async function load() {
-  const [portData, shipData] = await Promise.all([api.getPort(portId), api.getShip()])
+  const [portData, shipData, cannonData] = await Promise.all([api.getPort(props.portId), api.getShip(), api.getCannons(props.portId)])
   port.value = portData.port
   market.value = portData.market
   shipyard.value = portData.shipyard
@@ -190,6 +219,7 @@ async function load() {
   repairPricePerHp.value = portData.repair_price_per_hp
   ship.value = shipData.ship
   coins.value = shipData.coins
+  cannons.value = cannonData.cannons
   for (const p of portData.market) quantities[p.type] = 1
   repairAmount.value = maxAffordableRepair.value || 1
 }
@@ -239,7 +269,7 @@ function setRepairAmount(raw) {
 async function trade(product, action) {
   await withErrorHandling(async () => {
     const qty = quantities[product] || 1
-    const data = await api.trade(portId, product, action, qty)
+    const data = await api.trade(props.portId, product, action, qty)
     ship.value = data.ship
     coins.value = data.coins
   })
@@ -254,7 +284,7 @@ async function sellAll() {
     for (const p of market.value) {
       const qty = owned(p.type)
       if (qty <= 0) continue
-      const data = await api.trade(portId, p.type, 'sell', qty)
+      const data = await api.trade(props.portId, p.type, 'sell', qty)
       ship.value = data.ship
       coins.value = data.coins
     }
@@ -263,15 +293,36 @@ async function sellAll() {
 
 async function buyShip(type) {
   await withErrorHandling(async () => {
-    const data = await api.buyShip(portId, type)
+    const data = await api.buyShip(props.portId, type)
     ship.value = data.ship
     coins.value = data.coins
+    // A bigger hull can mean more cannon slots (see Ship::ensureCannonSlots,
+    // run server-side on every purchase) — re-fetch so the Оружейник tab
+    // shows them without needing a full page reload.
+    cannons.value = (await api.getCannons(props.portId)).cannons
+    notifyShipSwap(data.refund)
   })
+}
+
+// Every swap resets cannons to stock level 0 (see PortController::buyShip)
+// — worth saying out loud, not just quietly reflected in the Оружейник tab
+// a click later. A downgrade also gets gold back for the old hull/cannons
+// it's leaving behind; nothing to say when that's zero (a plain upgrade).
+function notifyShipSwap(refund) {
+  if (refund?.total > 0) {
+    Notify.create({
+      type: 'positive',
+      position: 'top',
+      message: `Корабль продан за ${refund.ship} золота, пушки за ${refund.cannons} золота (${refund.total} всего). Новые пушки — с нуля.`,
+    })
+  } else {
+    Notify.create({ type: 'info', position: 'top', message: 'Пушки нового корабля начинают с уровня 0.' })
+  }
 }
 
 async function hireFire(type, action) {
   await withErrorHandling(async () => {
-    const data = await api.tavern(portId, type, action)
+    const data = await api.tavern(props.portId, type, action)
     ship.value = data.ship
     coins.value = data.coins
   })
@@ -279,24 +330,32 @@ async function hireFire(type, action) {
 
 async function repair() {
   await withErrorHandling(async () => {
-    const data = await api.repair(portId, repairAmount.value)
+    const data = await api.repair(props.portId, repairAmount.value)
     ship.value = data.ship
     coins.value = data.coins
     repairAmount.value = maxAffordableRepair.value || 1
   })
 }
 
+async function upgradeCannon(slot) {
+  await withErrorHandling(async () => {
+    const data = await api.upgradeCannon(props.portId, slot)
+    cannons.value = data.cannons
+    coins.value = data.coins
+  })
+}
+
 onMounted(async () => {
-  // Reachable via more than just the "Войти в порт" button (browser back
-  // after already sailing off, a direct/stale URL, ...) — the server now
-  // rejects the very first request here (getPort) if the ship isn't
-  // actually near this port right now (see PortController::proximityError),
-  // so a failure here means "this page doesn't belong open," not "show a
-  // banner and a broken market with nothing in it."
+  // Reachable only while the ship is actually near this port (the "Войти в
+  // порт" prompt in WorldPage only opens this modal when nearPort is set)
+  // — but the server still re-checks proximity itself on this very first
+  // request (see PortController::proximityError), so a failure here means
+  // something changed between the prompt showing and this load actually
+  // landing (moved off, connection hiccup), not a broken market to show.
   try {
     await load()
   } catch {
-    router.replace('/world')
+    close()
     return
   }
   loading.value = false
@@ -305,7 +364,7 @@ onMounted(async () => {
 // Dedicated shortcut back to the world (gamepad Circle/B by default) — same
 // destination as clicking "Уплыть", just reachable without navigating focus
 // to it first.
-const unsubBack = controls.onPress('back', () => router.push('/world'))
+const unsubBack = controls.onPress('back', close)
 // Same overlay as in the world (Triangle/Y by default) — the port's own
 // tabs already show most of this, but keeping the shortcut consistent
 // across screens beats a button that only works in one place.
@@ -347,14 +406,16 @@ watch(repairAmount, () => nextTick(refreshItems))
 </script>
 
 <style scoped>
-.port-page {
-  min-height: 100vh;
-  background: radial-gradient(140% 70% at 50% -10%, var(--c-bg-mid) 0%, var(--c-bg-deep) 60%), var(--c-bg-deep);
+.port-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 22;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 16px;
   box-sizing: border-box;
+  background: rgba(6, 12, 15, 0.6);
 }
 .text-center.q-mt-xl { color: var(--c-ink-soft); }
 
@@ -472,6 +533,31 @@ watch(repairAmount, () => nextTick(refreshItems))
   color: var(--c-parchment-ink-soft);
 }
 
+/* Up to 30 cannons on a Battleship — a grid, not a list, so that many
+   still fits without scrolling forever. 3 columns keeps each card wide
+   enough for the stat line to stay readable at the sheet's own max-width. */
+.panel--gunsmith { padding: 0 8px; }
+.cannon-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.cannon-card {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 10px 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.35);
+  border: 1px solid var(--c-parchment-border);
+  text-align: center;
+}
+.cannon-card--maxed { background: rgba(217, 164, 65, 0.16); border-color: rgba(217, 164, 65, 0.5); }
+.cannon-card__icon { width: 22px; height: 22px; color: var(--c-parchment-ink-soft); margin-bottom: 2px; }
+.cannon-card__title { font-weight: 700; font-size: 12.5px; color: var(--c-parchment-ink); }
+.cannon-card__level { font-size: 11px; color: var(--c-parchment-ink-soft); font-variant-numeric: tabular-nums; }
+.cannon-card__stats { font-size: 10px; color: var(--c-parchment-ink-soft); line-height: 1.3; margin: 2px 0 4px; }
+.cannon-card__btn { width: 100%; padding: 7px 4px; font-size: 10.5px; }
+.cannon-card__maxed-badge {
+  width: 100%; padding: 7px 4px; border-radius: 8px;
+  background: rgba(217, 164, 65, 0.25); color: var(--c-gold);
+  font-size: 11px; font-weight: 700;
+}
+
 .leave-btn {
   position: absolute;
   left: 0;
@@ -492,7 +578,7 @@ watch(repairAmount, () => nextTick(refreshItems))
    triggers focus via a plain JS .focus() call, and browsers don't
    consistently treat that as "should show the ring" the way a real
    keydown does, so :focus-visible could silently disappear on a gamepad. */
-.port-page :focus {
+.port-modal :focus {
   outline: 3px solid var(--c-gold-bright);
   outline-offset: 2px;
 }

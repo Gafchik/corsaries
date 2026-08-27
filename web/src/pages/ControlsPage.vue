@@ -229,7 +229,7 @@ useMenuNav(pageRef, { watchSource: () => [tab.value, capturing.value] })
 }
 .cancel-btn { border-color: var(--c-danger); color: var(--c-danger); background: rgba(226, 104, 94, 0.1); }
 
-/* Plain :focus, not :focus-visible — see the same note in PortPage.vue. */
+/* Plain :focus, not :focus-visible — see the same note in PortModal.vue. */
 .controls-page :focus {
   outline: 3px solid var(--c-gold-bright);
   outline-offset: 2px;

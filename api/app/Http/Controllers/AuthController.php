@@ -238,6 +238,7 @@ class AuthController extends Controller
         $user->update(['coins' => 300]);
 
         ShipSailor::create(['ship_id' => $ship->id, 'type' => 'jung', 'count' => 3]);
+        $ship->ensureCannonSlots();
     }
 
     /**

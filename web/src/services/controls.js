@@ -80,6 +80,7 @@ class Controls {
     this.capture = null // { deviceType, resolve } while a rebind is in progress
     this.captureArmed = false // true once whatever activated capture mode has been released — see captureNext
     this.touchVector = { x: 0, y: 0 } // set by the on-screen joystick, see setTouchVector
+    this.touchHeld = new Set() // actions currently held via a touch button — see touchHoldStart
 
     window.addEventListener('keydown', this.handleKeydown)
     window.addEventListener('keyup', this.handleKeyup)
@@ -200,6 +201,23 @@ class Controls {
   /** A touch button standing in for a discrete keypress/gamepad-button press — same emit() path, same listeners. */
   touchPress(action) {
     this.emit(action)
+  }
+
+  /**
+   * Hold-state for a touch button, e.g. the broadside rings' aim-preview
+   * (see WorldPage.vue) — a touch is a DOM pointer event on an element
+   * outside the Phaser canvas, so it can't be polled the way a keyboard key
+   * or gamepad button can (see isDown/WorldScene's own gamepad check);
+   * this Set is the only record that it's currently held.
+   */
+  touchHoldStart(action) {
+    this.touchHeld.add(action)
+  }
+  touchHoldEnd(action) {
+    this.touchHeld.delete(action)
+  }
+  isTouchHeld(action) {
+    return this.touchHeld.has(action)
   }
 
   /** Call once per frame (e.g. from the Phaser scene's update()) — gamepad buttons have no native press event, only polling. */

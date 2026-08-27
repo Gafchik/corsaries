@@ -18,6 +18,25 @@ export async function loadShip(userId) {
   return rows[0] ?? null
 }
 
+// One entry per slot, ordered — GunsmithController::ensureCannonSlots (run
+// on every shipyard purchase, Laravel-side) guarantees a contiguous
+// 0..cannon_count-1 run for whatever the ship's CURRENT type is, so this is
+// safe to index straight into by position. Read once per onJoin (see
+// WorldRoom.js) — a player reaches this service fresh every time (leaving
+// the world room to visit a port disconnects entirely, per the client's
+// own onBeforeUnmount), so there's nothing to invalidate mid-session: a
+// gunsmith purchase is already reflected the next time they actually join.
+export async function loadShipCannonLevels(userId) {
+  const { rows } = await pool.query(
+    `SELECT sc.level FROM ship_cannons sc
+     JOIN ships s ON s.id = sc.ship_id
+     WHERE s.user_id = $1
+     ORDER BY sc.slot`,
+    [userId],
+  )
+  return rows.map((r) => r.level)
+}
+
 export async function saveShip(userId, { x, y, hp }) {
   await pool.query('UPDATE ships SET x = $1, y = $2, hp = $3, updated_at = now() WHERE user_id = $4', [x, y, hp, userId])
 }

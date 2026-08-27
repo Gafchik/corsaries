@@ -1,7 +1,7 @@
 import { Room } from '@colyseus/core'
 import { ArraySchema, MapSchema } from '@colyseus/schema'
 import { Player, Island, CargoDrop, createWorldState } from '../schema/WorldState.js'
-import { loadShip, saveShip, awardBounty, applyDeathPenalty, claimCargoProducts } from '../db.js'
+import { loadShip, saveShip, awardBounty, applyDeathPenalty, claimCargoProducts, loadShipCannonLevels } from '../db.js'
 import { verifyToken, laravelPost, laravelGetPorts } from '../auth.js'
 import { generateIslands } from '../worldgen.js'
 
@@ -19,6 +19,55 @@ const SHIP_SPEED_MULT = {
   boat: 0.75, schooner: 0.75, caravel: 0.75, brig: 0.75,
   frigate: 1.0, galleon: 1.25, corvette: 2.0, battleship: 1.5,
 }
+// Mirrors config/ships.php's cannon_count — always split evenly in two by
+// handleFire below (first half of slots = left broadside, second half =
+// right), so it needs to actually match what Ship::ensureCannonSlots (PHP)
+// creates, or a client's cannon list and the server's idea of "how many
+// guns actually fire" would disagree.
+const SHIP_CANNON_COUNT = {
+  boat: 6, schooner: 10, caravel: 14, brig: 16,
+  frigate: 20, galleon: 24, corvette: 18, battleship: 30,
+}
+// Mirrors config/cannons.php — see that file's own comment for the
+// calibration damage/range are built to satisfy (tier N's maxed cannon
+// lands just under tier N+1's level-1) and for why speed is deliberately
+// NOT on that same curve (a Galleon's ball read as a pistol shot when it
+// was). Each cannon on a side now fires its OWN ball with its OWN
+// damage/range/speed (see broadsideCannons/handleFire) — no more
+// summing/averaging into one aggregate shot.
+//
+// range was originally 260/355/484/660/900/1227/1000/1673 — kept the same
+// ~×1.36-per-tier ratios (so the level-vs-next-tier calibration above still
+// holds) but scaled down by roughly ×0.3 across the board. At the old
+// numbers a Galleon could hit something roughly half a typical screen
+// away — you'd never even see what shot you. These keep the same relative
+// identity (Battleship still reaches furthest, Corvette still trades range
+// for its speed) at distances that actually fit on screen.
+const CANNON_BASE = {
+  boat: { damage: 15, range: 78, speed: 600 },
+  schooner: { damage: 20, range: 107, speed: 650 },
+  caravel: { damage: 27, range: 145, speed: 700 },
+  brig: { damage: 37, range: 198, speed: 750 },
+  frigate: { damage: 50, range: 270, speed: 820 },
+  galleon: { damage: 69, range: 368, speed: 900 },
+  corvette: { damage: 55, range: 300, speed: 1600 },
+  battleship: { damage: 94, range: 502, speed: 1000 },
+}
+const CANNON_LEVEL_BONUS_FRACTION = 0.1
+// How wide one broadside's volley fans out, in radians either side of the
+// dead-center aim line — these are real individual gun barrels along the
+// hull, not one wide blast, so this stays narrow. Mirrored client-side
+// (WorldPage.vue's CANNON_SPREAD_HALF_ANGLE) purely for the aim-hold
+// preview to actually match what's about to fire; the server never trusts
+// the client's copy for anything that matters (hit resolution below uses
+// this value directly).
+const CANNON_SPREAD_HALF_ANGLE = 0.16
+// Reload is a fourth upgradeable stat, but deliberately NOT scaled like the
+// other three (see config/cannons.php's own comment) — same base cooldown
+// on every hull, a small flat per-level cut, so a maxed Battleship still
+// fires like a broadside and not a machine gun.
+const RELOAD_BASE_MS = 900
+const RELOAD_LEVEL_BONUS_FRACTION = 0.02
 const AUTOSAVE_INTERVAL_MS = 10000
 
 // Mirrors config/products.php's keys — bots don't have a real persisted
@@ -52,7 +101,6 @@ const SPAWN = { x: 2400, y: 2400 }
 // samples each island's `points` array has, evenly spaced around the circle.
 const SHORE_POINT_COUNT = 16
 
-const CANNON_RANGE = 260
 // Keep in sync with ABORDAGE_RANGE in web/src/pages/WorldPage.vue — the
 // client's proximity check for showing the button and this server-side
 // check for actually honoring a challenge need to agree, or a client could
@@ -69,29 +117,19 @@ const PORT_ENTER_RANGE = 220
 // generous next to ABORDAGE_RANGE's "вплотную" since this is a race to
 // reach a fixed point, not a lunge at a moving target.
 const CARGO_PICKUP_RANGE = 140
-const CARGO_DROP_TTL_MS = 60000
-// A cannonball is now a real object that travels and can miss — see
-// tickCannonballs(). Speed must match CANNONBALL_SPEED in WorldPage.vue: the
-// client's own blind visual tween and the server's actual hit-resolution
-// window need to take the same time to cross the same distance, or a "miss"
-// would visually look like it should've hit (or vice versa).
-const CANNONBALL_SPEED = 600
+// Was 60s — too tight for the exact case this "partial fit stays behind"
+// design was built for: couldn't take it all, sail to port, sell to free
+// up the hold, sail back for the rest. A real round trip plus shopping
+// routinely outlasts a minute, so the drop was gone before anyone could
+// reasonably act on what it left behind (direct feedback).
+const CARGO_DROP_TTL_MS = 120000
+// A cannonball is a real object that travels and can miss — see
+// tickCannonballs(). Range/speed used to be flat constants here (matching
+// ones in WorldPage.vue); now each ball carries its own, from the
+// shooter's actual cannons (see broadsideStats/CANNON_BASE) — the client's
+// visual tween just mirrors whatever this side actually decided, same as
+// it always has for damage.
 const CANNONBALL_HIT_RADIUS = 26
-// Damage scales off the SHOOTER's own max HP, not a flat number or cannon
-// count — cannon_count (config/ships.php) grows slower than max_hp as ships
-// get bigger (a boat has 125 HP per cannon, a battleship 833), so scaling
-// damage off cannon_count alone made every hull's broadside deal roughly
-// the same *fraction of a same-tier target's HP*, tier be damned: a boat's
-// four little guns and a galleon's twelve heavy ones both took ~15-17 hits
-// to sink a same-tier opponent, and a galleon needed 17 hits to sink a BOAT
-// — no real ship-of-the-line vs. rowboat gap at all. Tying damage to the
-// shooter's own max HP instead fixes both at once: any same-tier fight
-// takes about 1/DAMAGE_FRACTION_OF_OWN_HP hits regardless of tier (bigger
-// guns, but a proportionally tankier target), while a real tier gap (a
-// galleon's 6500 HP hull vs. a boat's 500) closes in a single hit, the way
-// a ship of the line actually would.
-const DAMAGE_FRACTION_OF_OWN_HP = 1 / 6
-const FIRE_COOLDOWN_MS = 900
 
 const TARGET_BOT_COUNT = 100
 const BOT_AGGRESSIVE_CHANCE = 0.12
@@ -104,8 +142,6 @@ const BOT_RESPAWN_DELAY_MS = 4000
 // says should happen.
 const BOT_SPEED = 220
 const BOT_AGGRO_RANGE = 320 // was 500 — noticing a ship from nearly across the screen read as bots having eyes everywhere
-const BOT_ENGAGE_RANGE = 220 // inside CANNON_RANGE so a 90°-turned broadside still connects
-const BOT_ENGAGE_EXIT_RANGE = 280 // hysteresis: leaving broadside mode needs a wider gap than entering it
 // With 100 bots on the map, a relay of different aggressive ones drifting
 // in and out of range read as one endless, un-losable chase — a bot now
 // gives up after a bounded chase, same as the original's AI not being
@@ -157,6 +193,19 @@ function islandBoundaryRadius(island, angle) {
 // client to trust or not trust for those.
 export class WorldRoom extends Room {
   onCreate() {
+    // Colyseus disposes a room ~1s after its last real client disconnects
+    // (autoDispose defaults to true) — fine for a disposable match, fatal
+    // for the one persistent shared world every client always matchmakes
+    // into (see index.js's /matchmake/world stub). Every bot, in-flight
+    // cannonball, and CargoDrop was getting wiped and the room silently
+    // recreated from scratch any time the player count briefly hit zero —
+    // which, well short of actually empty, is exactly what happens for a
+    // moment every time a lone player leaves the world for a port (that
+    // navigation fully disconnects — see WorldPage.vue's onBeforeUnmount)
+    // and nobody else happens to be online. Reported as "loot from a kill
+    // near a port vanished in under a minute" — the real bug was much
+    // bigger than the timer it looked like.
+    this.autoDispose = false
     this.setState(createWorldState())
 
     for (const { x, y, baseRadius, points } of generateIslands(MAP_SIZE)) {
@@ -169,6 +218,10 @@ export class WorldRoom extends Room {
     }
 
     this.lastFiredAt = new Map() // `${attackerId}:${side}` -> timestamp
+    // sessionId -> array of per-slot levels, loaded once on join (see
+    // loadShipCannonLevels's own comment for why that's safe) — bots never
+    // get an entry, handleFire falls back to a flat table for them instead.
+    this.playerCannonLevels = new Map()
     this.botRuntime = new Map() // botId -> { mode, headingChangedAt }
     this.botCounter = 0
     this.cannonballs = [] // in-flight balls — see tickCannonballs()
@@ -208,11 +261,47 @@ export class WorldRoom extends Room {
 
     this.onMessage('fire', (client, { side }) => {
       if (side !== 'left' && side !== 'right') return
-      this.handleFire(client.sessionId, side)
+      this.handleFire(client.sessionId, side, Date.now(), client)
     })
 
     this.onMessage('abordage_challenge', (client, { targetSessionId }) => {
       this.startPvpAbordage(client, targetSessionId).catch((e) => console.error('abordage_challenge failed', e))
+    })
+
+    // PortModal.vue awaits this before opening — Laravel's own port
+    // endpoints (PortController/GunsmithController proximityError) check
+    // this player's x/y straight from the `ships` table, which normally
+    // only gets this fresh via the AUTOSAVE_INTERVAL_MS(10s) tick or on
+    // disconnect (see onLeave/autosaveHumans). The old routed '/port/:id'
+    // page got a free fresh save for this exact reason — leaving the room
+    // to navigate there triggered onLeave's own saveShip. Now that a port
+    // visit never leaves the room at all (see PortModal.vue's own
+    // comment), something has to force that save explicitly instead, or a
+    // player who just arrived could get wrongly told they're "not at this
+    // port" for up to 10 seconds.
+    this.onMessage('save_position', (client) => {
+      const player = this.state.players.get(client.sessionId)
+      if (!player) return
+      saveShip(player.userId, player)
+        .then(() => client.send('position_saved'))
+        .catch((e) => console.error('save_position failed', e))
+    })
+
+    // Sent by WorldPage.vue the instant PortModal closes. Everything a port
+    // visit can change — repair (hp), buying a new hull (shipType/maxHp),
+    // Оружейник upgrades (playerCannonLevels) — happens over plain Laravel
+    // HTTP calls, not through this room, so the live Player here was
+    // otherwise stuck holding whatever it loaded at onJoin until the player
+    // fully disconnected and reconnected. The old routed '/port/:id' page
+    // got that refresh for free (leaving the room to navigate there, then
+    // rejoining fresh on the way back); a modal that never leaves the room
+    // needs to ask for it explicitly instead. Combat can't touch a docked
+    // player anyway (see isNearAnyPort in findCannonballHit), so refreshing
+    // once here — rather than after every single port action — is enough.
+    this.onMessage('refresh_ship', (client) => {
+      const player = this.state.players.get(client.sessionId)
+      if (!player) return
+      this.refreshShipFromDb(client.sessionId, player).catch((e) => console.error('refresh_ship failed', e))
     })
 
     for (let i = 0; i < TARGET_BOT_COUNT; i++) this.spawnBot()
@@ -309,11 +398,24 @@ export class WorldRoom extends Room {
     player.userId = userId
     player.authToken = client.auth._token
     this.state.players.set(client.sessionId, player)
+
+    this.playerCannonLevels.set(client.sessionId, await loadShipCannonLevels(userId))
+  }
+
+  /** Re-reads shipType/maxHp/hp/cannon levels from the DB into an already-live Player — see the 'refresh_ship' handler's own comment for why this needs to exist at all. Same fields onJoin sets from the same loadShip/loadShipCannonLevels calls, just applied to an existing player instead of a fresh one. */
+  async refreshShipFromDb(sessionId, player) {
+    const saved = await loadShip(player.userId)
+    if (!saved) return
+    player.shipType = saved.type
+    player.maxHp = SHIP_MAX_HP[saved.type] ?? SHIP_MAX_HP.boat
+    player.hp = saved.hp
+    this.playerCannonLevels.set(sessionId, await loadShipCannonLevels(player.userId))
   }
 
   async onLeave(client) {
     const player = this.state.players.get(client.sessionId)
     this.state.players.delete(client.sessionId)
+    this.playerCannonLevels.delete(client.sessionId)
     if (player) await saveShip(player.userId, player)
   }
 
@@ -514,11 +616,18 @@ export class WorldRoom extends Room {
         continue
       }
 
+      // Scales per-tier now that cannon range does too (see CANNON_BASE) —
+      // a flat engage distance meant a Battleship bot (base range ~1670)
+      // sailed needlessly close before ever opening fire, giving up the
+      // range advantage its bigger guns are actually supposed to have.
+      // Bots always fight at level-0 (no upgrades to load), so their own
+      // ship type's base range is the real number to engage off of.
+      const engageRange = (CANNON_BASE[bot.shipType] ?? CANNON_BASE.boat).range * 0.85
       // Hysteresis: leaving broadside range needs to clear a wider band than
       // entering it did, or a target sitting right on the boundary flips the
       // bot between "approach" and "broadside" — two very different headings
       // — every single tick, which is exactly the zig-zag that got reported.
-      const exitRange = runtime.mode === 'broadside' ? BOT_ENGAGE_EXIT_RANGE : BOT_ENGAGE_RANGE
+      const exitRange = runtime.mode === 'broadside' ? engageRange * 1.25 : engageRange
 
       if (target.dist > exitRange) {
         runtime.mode = 'approach'
@@ -613,8 +722,11 @@ export class WorldRoom extends Room {
     const rightBroadside = toTarget + Math.PI
     const leftBroadside = toTarget
 
-    const rightReady = now - (this.lastFiredAt.get(`${botId}:right`) ?? 0) >= FIRE_COOLDOWN_MS
-    const leftReady = now - (this.lastFiredAt.get(`${botId}:left`) ?? 0) >= FIRE_COOLDOWN_MS
+    // Bots always sit at cannon level 0 (no upgrade to load), so their real
+    // reload time is exactly RELOAD_BASE_MS, unmodified — same number
+    // FIRE_COOLDOWN_MS used to be before reload became a per-player stat.
+    const rightReady = now - (this.lastFiredAt.get(`${botId}:right`) ?? 0) >= RELOAD_BASE_MS
+    const leftReady = now - (this.lastFiredAt.get(`${botId}:left`) ?? 0) >= RELOAD_BASE_MS
 
     let side
     if (rightReady && !leftReady) side = 'right'
@@ -663,7 +775,10 @@ export class WorldRoom extends Room {
    * ship's hull other than the shooter's own — it doesn't care who that
    * ship is, so a third party sailing through the line of fire eats it too.
    */
-  handleFire(attackerId, side, now = Date.now()) {
+  // client is only ever set for a real player's own 'fire' message (see the
+  // onMessage handler above) — bots call this with no client to notify,
+  // since they're not a real connection and there's nothing to tell.
+  handleFire(attackerId, side, now = Date.now(), client = null) {
     const attacker = this.state.players.get(attackerId)
     if (!attacker) return
     // Bots already won't target a player standing in port territory (see
@@ -672,29 +787,106 @@ export class WorldRoom extends Room {
     // just humans: nobody gets to fire from inside the safe zone. Checked
     // before the cooldown below is even touched, so mashing fire while
     // docked doesn't burn a real shot's cooldown for nothing.
-    if (this.isNearAnyPort(attacker.x, attacker.y)) return
+    //
+    // The client already refuses to even send 'fire' while it knows it's
+    // docked (see updateAiming/currentNearPortId in WorldPage.vue) — this
+    // notifies anyway as a backstop for a stale or bypassed client, same
+    // reasoning as startPvpAbordage's own in_port_zone rejection.
+    if (this.isNearAnyPort(attacker.x, attacker.y)) {
+      client?.send('fire_rejected', { reason: 'in_port_zone' })
+      return
+    }
+
+    // Computed before the cooldown check now — reload is itself an
+    // upgradeable stat (see broadsideCannons/RELOAD_LEVEL_BONUS_FRACTION),
+    // so "is this side off cooldown yet" needs this side's own real reload
+    // time, not the flat constant it used to be.
+    const { cannons, cooldown } = this.broadsideCannons(attacker.shipType, attackerId, side)
 
     const cooldownKey = `${attackerId}:${side}`
     const lastFired = this.lastFiredAt.get(cooldownKey) ?? 0
-    if (now - lastFired < FIRE_COOLDOWN_MS) return
+    if (now - lastFired < cooldown) return
     this.lastFiredAt.set(cooldownKey, now)
 
     const fx = Math.sin(attacker.rotation)
     const fy = -Math.cos(attacker.rotation)
     const dir = side === 'right' ? { x: fy, y: -fx } : { x: -fy, y: fx }
-    const damage = Math.round((SHIP_MAX_HP[attacker.shipType] ?? SHIP_MAX_HP.boat) * DAMAGE_FRACTION_OF_OWN_HP)
+    const baseAngle = Math.atan2(dir.y, dir.x)
+    const count = cannons.length
 
-    this.broadcast('fired', { attackerId, side })
+    // Every cannon in the volley gets its own launch angle, fanned evenly
+    // across the spread (not randomized — these are fixed gun positions
+    // along the hull, they don't jitter shot to shot) and its own
+    // damage/range/speed from its own upgrade level.
+    for (let i = 0; i < count; i++) {
+      const t = count === 1 ? 0 : i / (count - 1) - 0.5 // -0.5..0.5
+      const angle = baseAngle + t * 2 * CANNON_SPREAD_HALF_ANGLE
+      const cannon = cannons[i]
+      this.cannonballs.push({
+        attackerId, x: attacker.x, y: attacker.y,
+        dx: Math.cos(angle), dy: Math.sin(angle), traveled: 0,
+        damage: cannon.damage, range: cannon.range, speed: cannon.speed,
+      })
+    }
 
-    this.cannonballs.push({ attackerId, x: attacker.x, y: attacker.y, dx: dir.x, dy: dir.y, traveled: 0, damage })
+    // The client's blind visual tween (see spawnBroadsideVolley in
+    // WorldPage.vue) reconstructs the same fan shape from just the count —
+    // it doesn't need each individual cannon's exact numbers (that's not
+    // what decides any real hit; 'hit' below carries the actual damage
+    // dealt), just enough to look right: how many balls, how far, how fast.
+    const range = Math.max(...cannons.map((c) => c.range))
+    const speed = Math.round(cannons.reduce((sum, c) => sum + c.speed, 0) / count)
+    this.broadcast('fired', { attackerId, side, count, range, speed })
+  }
+
+  /**
+   * Per-cannon stats for one broadside (half the ship's cannons, split per
+   * SHIP_CANNON_COUNT — first half of slots is 'left', second half
+   * 'right', an arbitrary but consistent split, not tied to which UI
+   * button a player actually calls "left"). Each entry is one gun's own
+   * damage/range/speed at its own upgrade level — "качать каждую пушку
+   * отдельно" means each one actually fires its own ball now, not just a
+   * separately-tracked number folded into one aggregate shot. Cooldown is
+   * still shared across the whole side (one crew reloading one battery),
+   * based on the side's AVERAGE level. Uses the player's real upgrade
+   * levels if known (see playerCannonLevels, loaded once on join) or a flat
+   * level-0 for every slot otherwise — bots (no account to own an
+   * upgrade), or a human whose levels haven't finished loading yet — same
+   * numbers a stock, unupgraded hull of that type would have either way.
+   */
+  broadsideCannons(shipType, sessionId, side) {
+    const totalCannons = SHIP_CANNON_COUNT[shipType] ?? SHIP_CANNON_COUNT.boat
+    const perSide = Math.max(1, Math.floor(totalCannons / 2))
+    const levels = this.playerCannonLevels.get(sessionId)
+    const base = CANNON_BASE[shipType] ?? CANNON_BASE.boat
+    const offset = side === 'right' ? perSide : 0
+
+    const cannons = []
+    let levelSum = 0
+    for (let i = 0; i < perSide; i++) {
+      const level = levels?.[offset + i] ?? 0
+      const mult = 1 + CANNON_LEVEL_BONUS_FRACTION * level
+      cannons.push({
+        damage: Math.round(base.damage * mult),
+        range: Math.round(base.range * mult),
+        speed: Math.round(base.speed * mult),
+      })
+      levelSum += level
+    }
+    // Reload uses the SIDE'S AVERAGE level, same reasoning speed used to —
+    // deliberately not the fastest gun in the battery (that'd make one
+    // upgraded cannon drag the whole broadside's cadence up) or the slowest.
+    const avgLevel = levelSum / perSide
+    const cooldown = Math.round(RELOAD_BASE_MS * (1 - RELOAD_LEVEL_BONUS_FRACTION * avgLevel))
+    return { cannons, cooldown }
   }
 
   tickCannonballs(deltaMs) {
     if (this.cannonballs.length === 0) return
-    const step = CANNONBALL_SPEED * (deltaMs / 1000)
     const remaining = []
 
     for (const ball of this.cannonballs) {
+      const step = ball.speed * (deltaMs / 1000)
       ball.x += ball.dx * step
       ball.y += ball.dy * step
       ball.traveled += step
@@ -710,7 +902,7 @@ export class WorldRoom extends Room {
         continue
       }
 
-      if (ball.traveled < CANNON_RANGE) remaining.push(ball) // still flying — a clean miss once it runs out
+      if (ball.traveled < ball.range) remaining.push(ball) // still flying — a clean miss once it runs out
     }
 
     this.cannonballs = remaining

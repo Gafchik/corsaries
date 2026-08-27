@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Seaport;
 use App\Models\SeaportProduct;
+use App\Models\ShipCannon;
 use App\Models\ShipProduct;
 use App\Models\ShipSailor;
 use Illuminate\Http\JsonResponse;
@@ -103,6 +104,21 @@ class PortController extends Controller
         return response()->json(['ship' => ShipController::serialize($ship->fresh(['products', 'sailors'])), 'coins' => $request->user()->fresh()->coins]);
     }
 
+    /**
+     * Buying a new hull is a full swap, not a modular upgrade — the old
+     * ship (and whatever was sunk into its cannons) doesn't come along.
+     * Moving UP costs full price and starts every cannon at level 0, same
+     * as a brand new hull always has (no compensation — you're getting a
+     * strictly better ship). Moving DOWN partially cashes out what you're
+     * leaving behind instead of just deleting it: half the price gap
+     * between the two hulls (the old one is used, not worth full trade-in),
+     * plus a fifth of whatever gold actually went into upgrading the old
+     * ship's cannons (also used, steeper discount) — see tradeInRefund/
+     * cannonInvestmentRefund. The combined refund is capped at the new
+     * ship's own price so a downgrade can be free at best, never a net
+     * profit (uncapped, a Линкор -> Шлюпка round trip would print money).
+     * Crew doesn't fit a smaller hull either — see trimCrewForDowngrade.
+     */
     public function buyShip(Request $request, Seaport $port): JsonResponse
     {
         if ($error = $this->proximityError($request, $port)) {
@@ -113,16 +129,47 @@ class PortController extends Controller
             'type' => ['required', 'string', 'in:'.implode(',', array_keys(config('ships')))],
         ]);
 
-        $price = config("ships.{$data['type']}.price");
-        if ($request->user()->coins < $price) {
+        $ship = $request->user()->ship()->firstOrFail();
+        if ($data['type'] === $ship->type) {
+            return $this->error('У тебя уже такой корабль.');
+        }
+
+        $oldPrice = config("ships.{$ship->type}.price");
+        $newPrice = config("ships.{$data['type']}.price");
+        $isDowngrade = $newPrice < $oldPrice;
+
+        // Computed from the OLD ship/cannons before anything below deletes
+        // or replaces them.
+        $shipRefund = $isDowngrade ? $this->tradeInRefund($oldPrice, $newPrice) : 0;
+        $cannonRefund = $isDowngrade ? $this->cannonInvestmentRefund($ship) : 0;
+        $totalRefund = min($shipRefund + $cannonRefund, $newPrice);
+        $netCost = $newPrice - $totalRefund;
+
+        if ($request->user()->coins < $netCost) {
             return $this->error('Недостаточно золота.');
         }
 
-        $ship = $request->user()->ship()->firstOrFail();
-        $request->user()->decrement('coins', $price);
+        if ($netCost > 0) {
+            $request->user()->decrement('coins', $netCost);
+        }
         $ship->update(['type' => $data['type'], 'hp' => config("ships.{$data['type']}.max_hp")]);
 
-        return response()->json(['ship' => ShipController::serialize($ship->fresh(['products', 'sailors'])), 'coins' => $request->user()->fresh()->coins]);
+        // Cannons never carry over between hulls now — every swap starts
+        // with fresh, stock level-0 guns (a downgrade's old investment is
+        // what cannonInvestmentRefund above just partially cashed out
+        // instead of silently orphaning it forever).
+        ShipCannon::where('ship_id', $ship->id)->delete();
+        $ship->ensureCannonSlots();
+
+        if ($isDowngrade) {
+            $this->trimCrewForDowngrade($ship, $ship->stats()['max_sailors']);
+        }
+
+        return response()->json([
+            'ship' => ShipController::serialize($ship->fresh(['products', 'sailors'])),
+            'coins' => $request->user()->fresh()->coins,
+            'refund' => ['ship' => $shipRefund, 'cannons' => $cannonRefund, 'total' => $totalRefund],
+        ]);
     }
 
     public function tavern(Request $request, Seaport $port): JsonResponse
@@ -264,6 +311,62 @@ class PortController extends Controller
         }
 
         return null;
+    }
+
+    /**
+     * 50% of the price gap between the old (bigger) hull and the new
+     * (cheaper) one — a partial trade-in, not a full refund, since the old
+     * ship is used. Only ever called on a downgrade (newPrice < oldPrice),
+     * so this is always positive on its own; buyShip caps the COMBINED
+     * refund (this + cannonInvestmentRefund) at newPrice, so this alone
+     * being large doesn't matter — a downgrade still can't turn a profit.
+     */
+    private function tradeInRefund(int $oldPrice, int $newPrice): int
+    {
+        return (int) round(($oldPrice - $newPrice) * 0.5);
+    }
+
+    /**
+     * 20% of whatever gold actually went into leveling the OLD ship's
+     * cannons — cannons never carry over to a new hull (see buyShip), so a
+     * downgrade "sells" that investment back at a steep loss instead of
+     * just deleting it outright. Must run BEFORE buyShip deletes/recreates
+     * the ship's cannon rows for the new type.
+     */
+    private function cannonInvestmentRefund(\App\Models\Ship $ship): int
+    {
+        $levelCosts = config('cannons.level_cost');
+        $spent = ShipCannon::where('ship_id', $ship->id)->get()->sum(
+            fn (ShipCannon $cannon) => array_sum(array_slice($levelCosts, 0, $cannon->level))
+        );
+
+        return (int) round($spent * 0.2);
+    }
+
+    /**
+     * A smaller hull has fewer bunks — whoever doesn't fit is let go,
+     * weakest first (Юнга, then Опытный матрос, Морской волк last), no
+     * severance. Only called on a downgrade; upgrading never touches crew
+     * at all, they all just come along for the bigger ship.
+     */
+    private function trimCrewForDowngrade(\App\Models\Ship $ship, int $maxSailors): void
+    {
+        $order = ['jung', 'experienced', 'sea_wolf'];
+        $rows = ShipSailor::where('ship_id', $ship->id)->get()->keyBy('type');
+        $excess = $rows->sum('count') - $maxSailors;
+
+        foreach ($order as $type) {
+            if ($excess <= 0) {
+                break;
+            }
+            $row = $rows->get($type);
+            if (! $row || $row->count <= 0) {
+                continue;
+            }
+            $cut = min($row->count, $excess);
+            $row->decrement('count', $cut);
+            $excess -= $cut;
+        }
     }
 
     private function shipyardOffers(): array
