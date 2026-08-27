@@ -428,7 +428,14 @@ watch(repairAmount, () => nextTick(refreshItems))
 
 <style scoped>
 .port-modal {
-  position: absolute;
+  /* fixed, not absolute — an absolute overlay drifts along with whatever
+     ancestor happens to scroll, and on mobile the qty-input's on-screen
+     keyboard scrolls the page to keep the focused field visible above it;
+     once the keyboard closes that scroll offset can stick, dragging the
+     whole modal (Уплыть included) up off the top of the actual viewport
+     with no way back (direct feedback/screenshot). Fixed pins it to the
+     real viewport regardless of what any ancestor is doing. */
+  position: fixed;
   inset: 0;
   z-index: 22;
   display: flex;
@@ -462,6 +469,15 @@ watch(repairAmount, () => nextTick(refreshItems))
      easy to miss and silently breaks the whole point of splitting it out. */
   min-height: 0;
   overflow-y: auto;
+  /* Every tab shares this one scrolling list — Оружейник's grid, Верфь's
+     8 rows, a long Рынок list, all of it. Swiping past its own top/bottom
+     edge used to hand the rest of that touch gesture to whatever's behind
+     the modal (classic mobile scroll-chaining), which could drag the
+     whole page/modal position along with it and leave Уплыть stranded
+     off-viewport with no way to scroll back (direct feedback, reproduced
+     on multiple tabs). This stops the gesture right at the list's own
+     boundary instead of letting it leak out.  */
+  overscroll-behavior: contain;
   /* Пергамент как «прилавок»: рынок/верфь/таверна/ремонт читаются как
      конторская книга, в отличие от тёмного каркаса вокруг них. */
   background: var(--c-parchment);

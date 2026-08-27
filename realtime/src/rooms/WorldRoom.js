@@ -358,6 +358,21 @@ export class WorldRoom extends Room {
         .catch((e) => console.error('refresh_ship failed', e))
     })
 
+    // WorldPage.vue sends this itself the instant it's actually listening
+    // for the answer (see setupNetworking) — replaces the old "push it
+    // proactively from onJoin and hope the client's handler is already
+    // registered" approach, which lost the race often enough in a real
+    // browser (Phaser scene construction is nowhere near as fast as a
+    // bare join) that a plain page reload could land the very first shot
+    // at the small DEFAULT_AIM_RANGE fallback (direct feedback). A
+    // request the client controls the timing of can't have that race —
+    // it's simply never sent before the client is ready for the reply.
+    this.onMessage('request_broadside_stats', (client) => {
+      const player = this.state.players.get(client.sessionId)
+      if (!player) return
+      this.sendBroadsideStats(client, player.shipType, client.sessionId)
+    })
+
     for (let i = 0; i < TARGET_BOT_COUNT; i++) this.spawnBot()
     this.setSimulationInterval((deltaMs) => {
       this.tickBots(deltaMs)
@@ -454,7 +469,9 @@ export class WorldRoom extends Room {
     this.state.players.set(client.sessionId, player)
 
     this.playerCannonLevels.set(client.sessionId, await loadShipCannonLevels(userId))
-    this.sendBroadsideStats(client, shipType, client.sessionId)
+    // No proactive send here — see 'request_broadside_stats' below for why
+    // this player's own client asks for it instead, once it's actually
+    // ready to listen.
   }
 
   /** Re-reads shipType/maxHp/hp/cannon levels from the DB into an already-live Player — see the 'refresh_ship' handler's own comment for why this needs to exist at all. Same fields onJoin sets from the same loadShip/loadShipCannonLevels calls, just applied to an existing player instead of a fresh one. */
@@ -477,9 +494,11 @@ export class WorldRoom extends Room {
    * fallback even on a ship whose real range was much bigger — an
    * intermittent-feeling bug that was really just "whichever side you
    * haven't fired from yet" (direct feedback: fired right, aimed left,
-   * got a tiny cone; fired left once, then it was correct). Called right
-   * after anything that could change either side's real range: onJoin and
-   * 'refresh_ship' (cannon upgrades, a new hull).
+   * got a tiny cone; fired left once, then it was correct). Called for
+   * 'request_broadside_stats' (the client's own ask, once it's ready to
+   * listen — see that handler's comment for why a plain onJoin push isn't
+   * used) and 'refresh_ship' (cannon upgrades, a new hull change what the
+   * answer would be, so it's worth re-sending unprompted there).
    */
   sendBroadsideStats(client, shipType, sessionId) {
     const right = this.broadsideCannons(shipType, sessionId, 'right')

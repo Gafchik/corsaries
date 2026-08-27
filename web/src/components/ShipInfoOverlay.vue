@@ -131,7 +131,11 @@ function pct(value, max) {
 
 <style scoped>
 .info-panel {
-  position: absolute;
+  /* fixed, not absolute — see PortModal.vue's identical fix for why: an
+     absolute overlay drifts with whatever ancestor scrolls, and mobile
+     keyboards (a focused input elsewhere on the page) can leave that
+     scroll stuck after closing, dragging the whole overlay off-viewport. */
+  position: fixed;
   inset: 0;
   z-index: 20;
   display: flex;

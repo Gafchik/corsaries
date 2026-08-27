@@ -911,6 +911,16 @@ class WorldScene extends Phaser.Scene {
       if (fireLeft?.range) this.lastKnownRange.fireLeft = fireLeft.range
       if (fireRight?.range) this.lastKnownRange.fireRight = fireRight.range
     })
+    // Asked for right here, the instant this listener is actually live —
+    // a server-side push from onJoin used to do this instead, but it had
+    // no way to know whether THIS client had gotten this far in Phaser
+    // scene setup yet (a bare join is much faster than constructing the
+    // whole scene), so on a plain page reload the message routinely beat
+    // this handler here and was silently dropped — the very first shot
+    // after a reload landing at the small DEFAULT_AIM_RANGE fallback
+    // (direct feedback). Asking instead of waiting to be told removes the
+    // race outright: this line cannot run before the listener above does.
+    this.room.send('request_broadside_stats')
 
     this.room.onMessage('hit', ({ attackerId, targetId, damage }) => {
       // A broadside is now several independent balls (see
