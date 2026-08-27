@@ -1503,18 +1503,24 @@ function notifyActionRejected(message) {
 }
 
 function performAction() {
-  if (nearHuman.value) challengeHuman()
+  // Port first — PORT_ENTER_RANGE (220) is much wider than ABORDAGE_RANGE
+  // (70), so standing at a port with another ship right next to you used
+  // to still offer/attempt abordage, which the server always rejects
+  // inside port territory anyway (see isNearAnyPort in WorldRoom.js). That
+  // meant the one button press could only ever fail, while silently
+  // hiding the port entry that would have actually worked.
+  if (nearPort.value) enterPort()
+  else if (nearHuman.value) challengeHuman()
   else if (nearBot.value) enterAbordage()
-  else if (nearPort.value) enterPort()
 }
 
 // Same priority as performAction() above, by construction — this only
 // decides what the notice SAYS, performAction alone decides what pressing
 // Действие actually DOES, so the two can never disagree with each other.
 const contextPrompt = computed(() => {
+  if (nearPort.value) return { text: `Войти в порт «${nearPort.value.name}»` }
   if (nearHuman.value) return { text: `Абордаж — ${nearHuman.value.firstName} (игрок)` }
   if (nearBot.value) return { text: `Абордаж — ${nearBot.value.firstName}` }
-  if (nearPort.value) return { text: `Войти в порт «${nearPort.value.name}»` }
   return null
 })
 
