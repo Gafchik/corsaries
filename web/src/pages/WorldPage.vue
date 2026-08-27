@@ -13,6 +13,24 @@
     -->
     <div class="world-frame">
       <div ref="container" class="world-canvas"></div>
+
+      <!--
+        Replaces the app-wide header's back arrow, which MainLayout.vue no
+        longer renders on this route at all — every pixel of vertical
+        space here actually matters (a fixed-position modal already fights
+        mobile browser chrome for it, see PortModal.vue), and that header
+        was the ONLY way a touch/mouse player without a bound gamepad/
+        keyboard 'back' action could ever leave the world. Sits right next
+        to the coordinate readout (both screen-fixed top-left) rather than
+        reintroducing a full-width bar.
+      -->
+      <button class="world-exit-btn" @click="leaveWorld" aria-label="В меню">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+          <polyline points="16 17 21 12 16 7" />
+          <line x1="21" y1="12" x2="9" y2="12" />
+        </svg>
+      </button>
       <!--
         A slim top-center notice instead of a big button pinned to an edge —
         the old version sat at a fixed bottom offset, which put it right in
@@ -36,9 +54,9 @@
            as a bonus, not a requirement. Hidden while PortModal is open —
            firing/aiming input is locked then anyway (see the activePortId
            watch below), so a live ring here would just be a lie. -->
-      <div v-if="!activePortId" class="broadside-hud">
+      <div v-if="!activePortId" class="broadside-hud" :class="{ 'broadside-hud--phone': showTouchControls }">
         <button
-          class="broadside-ring"
+          class="broadside-ring broadside-ring--left"
           :style="broadsideRingStyle(leftReloadFraction)"
           @pointerdown.prevent="controls.touchHoldStart('fireLeft')"
           @pointerup.prevent="controls.touchHoldEnd('fireLeft')"
@@ -50,7 +68,7 @@
           </span>
         </button>
         <button
-          class="broadside-ring"
+          class="broadside-ring broadside-ring--right"
           :style="broadsideRingStyle(rightReloadFraction)"
           @pointerdown.prevent="controls.touchHoldStart('fireRight')"
           @pointerup.prevent="controls.touchHoldEnd('fireRight')"
@@ -66,7 +84,10 @@
       <!-- Touch-only: a phone with no gamepad paired (see showTouchControls)
            gets an on-screen stick + action button instead of relying on
            WASD/gamepad. Sits above the canvas, so a tap here never also
-           reaches the canvas's own pointerdown-fires-cannon handler below. -->
+           reaches the canvas's own pointerdown-fires-cannon handler below.
+           Действие now sits bottom-right (правый борт moved up to make
+           room — see .broadside-hud--phone), not floating above the
+           broadside rings — direct sketch/request. -->
       <div v-if="showTouchControls && !activePortId" class="touch-controls">
         <TouchJoystick class="touch-controls__stick" />
         <button class="touch-btn" @pointerdown.prevent="controls.touchPress('action')">Действие</button>
@@ -103,7 +124,7 @@ import { Notify } from 'quasar'
 import Phaser from 'phaser'
 import { getStateCallbacks } from 'colyseus.js'
 import { joinWorld } from '@/services/realtime'
-import { api } from '@/services/api'
+import { api, setToken } from '@/services/api'
 import { controls, isPhone, onGamepadChange } from '@/services/controls'
 import ShipInfoOverlay from '@/components/ShipInfoOverlay.vue'
 import TouchJoystick from '@/components/TouchJoystick.vue'
@@ -236,6 +257,12 @@ const CARGO_DROP_TTL_MS = 120000
 // boundary samples each synced island's `points` array carries.
 const SHORE_POINT_COUNT = 16
 const MINIMAP_MARGIN = 12
+// Keep in sync with .world-exit-btn's own CSS position/size — same row as
+// the exit button (to its right, roughly vertically centered against it)
+// instead of stacked underneath, which cost an extra line of height this
+// corner didn't have to spend.
+const COORD_TEXT_X = 56
+const COORD_TEXT_Y = 20
 
 // Keep in sync with config/ships.php's key order.
 const SHIP_TYPES = ['boat', 'schooner', 'caravel', 'brig', 'frigate', 'galleon', 'corvette', 'battleship']
@@ -386,6 +413,20 @@ class WorldScene extends Phaser.Scene {
     // since this.scale is the Game-level ScaleManager and dies with the
     // whole Game on unmount, same as everything else in this scene.
     this.scale.on('resize', (gameSize) => this.handleResize(gameSize))
+
+    // A live rotation (no page reload) proved unreliable on iOS Chrome —
+    // the Scale Manager's own ResizeObserver either doesn't fire or fires
+    // with a stale/transitional container size right after
+    // orientationchange, leaving the camera/canvas resolution stuck at the
+    // pre-rotation size while CSS has already resized the container
+    // (reported as the view rendering zoomed into the wrong portion of the
+    // world post-rotation — only a reload, which re-measures from scratch,
+    // fixed it). scale.refresh() forces an explicit re-measure instead of
+    // trusting whatever the automatic ResizeObserver did; delayed since
+    // window.innerWidth/Height and the container's own layout are still
+    // settling for a moment right after the event fires.
+    this.orientationHandler = () => setTimeout(() => this.scale.refresh(), 300)
+    window.addEventListener('orientationchange', this.orientationHandler)
 
     const cannonballTexture = this.make.graphics({ x: 0, y: 0 })
     cannonballTexture.fillStyle(0x1a1a1a, 1)
@@ -684,8 +725,13 @@ class WorldScene extends Phaser.Scene {
     // Cargo weight/capacity aren't in the Player schema at all (see
     // setCargo's own comment) — starts at a harmless 0/1 until
     // refreshCargo() in WorldPage.vue resolves its first api.getShip().
+    // cargoReady gates addCargoWeight (see its own comment) — without it, a
+    // cargo pickup landing before that first fetch resolves added a real
+    // weight on top of the still-default capacity of 1, showing the bar as
+    // briefly full/overflowing until the fetch caught up and corrected it.
     this.cargoWeight = 0
     this.cargoCapacity = 1
+    this.cargoReady = false
     this.myCargoBar = this.createCargoBar(this.ship.x, this.ship.y + CARGO_BAR_Y_OFFSET)
 
     this.cameras.main.startFollow(this.ship, true, 0.1, 0.1)
@@ -696,7 +742,12 @@ class WorldScene extends Phaser.Scene {
     // frame (see updateHpBar in update()). Coordinates stayed — worth
     // reading off deliberately (sharing a position, navigating to a port),
     // not something you'd track by eye during combat the way HP is.
-    this.coordText = this.add.text(12, 12, '', { fontSize: '13px', color: '#bcd9d1' })
+    // Pale text alone (like the old #bcd9d1) read fine over the water but
+    // vanished against light sand whenever an island scrolled behind this
+    // screen-fixed corner (direct feedback). Dark fill this time, same
+    // stroke-outline trick NAME_TEXT_STYLE already uses just inverted —
+    // readable over anything behind it, water or shore.
+    this.coordText = this.add.text(COORD_TEXT_X, COORD_TEXT_Y, '', { fontSize: '13px', color: '#1a1410', stroke: '#f0ead6', strokeThickness: 3 })
     this.coordText.setScrollFactor(0)
     // Sets the real zoom on the camera (and repositions coordText for it)
     // before setupMinimap below draws the minimap frame — drawMinimapFrame
@@ -775,7 +826,10 @@ class WorldScene extends Phaser.Scene {
     // 'action'/'inventory' press from whatever page loaded next (harmless
     // to that page since emit() now also survives a broken listener, but
     // still dead code worth actually cleaning up).
-    const unsubscribeAll = () => this.controlUnsubs.forEach((unsub) => unsub())
+    const unsubscribeAll = () => {
+      this.controlUnsubs.forEach((unsub) => unsub())
+      window.removeEventListener('orientationchange', this.orientationHandler)
+    }
     this.events.once('shutdown', unsubscribeAll)
     this.events.once('destroy', unsubscribeAll)
   }
@@ -1377,7 +1431,7 @@ class WorldScene extends Phaser.Scene {
     // something sitting dead-center, and visibly drags anything else, like
     // this, toward the middle of the screen instead of staying put).
     if (this.coordText) {
-      const p = this.zoomCompensatePoint(12, 12)
+      const p = this.zoomCompensatePoint(COORD_TEXT_X, COORD_TEXT_Y)
       this.coordText.setPosition(p.x, p.y)
       this.coordText.setScale(1 / zoom)
     }
@@ -1666,10 +1720,22 @@ class WorldScene extends Phaser.Scene {
   setCargo(weight, capacity) {
     this.cargoWeight = weight
     this.cargoCapacity = capacity
+    this.cargoReady = true
   }
 
-  /** Cheap incremental bump for a cargo-drop pickup (see onCargoClaimed) — the exact claimed amount is already known client-side, no need to round-trip a fresh api.getShip() just to add it in. */
+  /**
+   * Cheap incremental bump for a cargo-drop pickup (see onCargoClaimed) —
+   * the exact claimed amount is already known client-side, no need to
+   * round-trip a fresh api.getShip() just to add it in. Gated on cargoReady:
+   * a pickup can land before refreshCargo()'s first setCargo() call
+   * resolves, and bumping cargoWeight against the still-default capacity=1
+   * from create() briefly rendered the bar as full/overflowing. The DB
+   * write behind this pickup happens before 'cargo_claimed' is even sent
+   * (see WorldRoom), so the in-flight api.getShip() picks it up on its own
+   * once it resolves — dropping the delta here doesn't lose it.
+   */
   addCargoWeight(delta) {
+    if (!this.cargoReady) return
     this.cargoWeight = Math.max(0, this.cargoWeight + delta)
   }
 
@@ -1825,6 +1891,14 @@ function notifyActionRejected(message) {
   Notify.create({ type: 'negative', message, position: 'top' })
 }
 
+// Same destination as the gamepad/keyboard 'back' action (see onBackPress
+// in the scene data below) and what the app header's own arrow used to do
+// before MainLayout.vue stopped rendering it on this route — this button
+// is what replaces that for anyone without a bound controller.
+function leaveWorld() {
+  router.push('/')
+}
+
 function performAction() {
   // Port first — PORT_ENTER_RANGE (220) is much wider than ABORDAGE_RANGE
   // (70), so standing at a port with another ship right next to you used
@@ -1850,10 +1924,24 @@ const contextPrompt = computed(() => {
 onMounted(async () => {
   stopGamepadWatch = onGamepadChange(() => { showTouchControls.value = isPhone() && !controls.firstGamepad() })
 
-  const [, { ports }] = await Promise.all([
-    joinWorld().then((r) => (room = r)),
-    api.listPorts(),
-  ])
+  // The router guard (see router/index.js) already keeps a request with NO
+  // token at all from ever reaching this page — this is the other half:
+  // one that's present but the server rejects anyway (expired, revoked,
+  // stale from a wiped test account). Used to just fail Promise.all with
+  // nothing catching it, leaving an empty canvas behind all the HUD chrome
+  // (still rendered — it doesn't depend on this succeeding) with no
+  // explanation and no way out short of a manual reload.
+  let ports
+  try {
+    ;[, { ports }] = await Promise.all([
+      joinWorld().then((r) => (room = r)),
+      api.listPorts(),
+    ])
+  } catch {
+    setToken(null)
+    router.replace('/login')
+    return
+  }
 
   // Server-side takeover: the same account just joined from another device
   // (see WorldRoom.onJoin) — this session's ship was already saved and
@@ -1939,9 +2027,38 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* Matches COORD_TEXT_Y's own comment in the script — this sits at the
+   very top-left corner, and the coordinate readout right below it is
+   pushed down far enough to clear it. Light chip + dark icon (same
+   readable-over-anything pairing coordText itself now uses) rather than
+   a plain dark icon, which would vanish against open water the same way
+   the old pale coordinates vanished against sand. */
+.world-exit-btn {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  left: calc(12px + env(safe-area-inset-left, 0px));
+  z-index: 15;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(240, 234, 214, 0.88);
+  border: 1px solid rgba(26, 20, 16, 0.3);
+  color: #1a1410;
+  cursor: pointer;
+  padding: 0;
+}
+.world-exit-btn svg { width: 18px; height: 18px; }
+
 .context-prompt {
   position: absolute;
-  top: calc(16px + env(safe-area-inset-top, 0px));
+  /* Below the exit button + coordinates row now (see .world-exit-btn,
+     ~12px top + 34px tall), not level with it — same top offset used to
+     put both at roughly the same height, which on a narrow phone could
+     run this banner's centered pill right into that corner. */
+  top: calc(58px + env(safe-area-inset-top, 0px));
   left: 50%;
   transform: translateX(-50%);
   max-width: calc(100% - 32px);
@@ -1982,6 +2099,26 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 10px;
   z-index: 15;
+}
+/* On a phone (Действие also renders here, see .touch-btn below) the two
+   rings split apart instead of sitting side by side: левый борт stays on
+   the bottom row but scoots over to make room for Действие sliding into
+   the slot правый борт used to occupy, and правый борт moves up into
+   Действие's old spot instead — direct request/sketch. The empty box
+   itself collapses (only absolutely-positioned children left), each ring
+   positioned off ITS edges instead of flex — same effective corner. */
+.broadside-hud--phone {
+  display: block;
+}
+.broadside-hud--phone .broadside-ring--left {
+  position: absolute;
+  right: 62px;
+  bottom: 0;
+}
+.broadside-hud--phone .broadside-ring--right {
+  position: absolute;
+  right: 0;
+  bottom: 62px;
 }
 .broadside-ring {
   width: 60px;
@@ -2030,10 +2167,11 @@ onBeforeUnmount(() => {
 .touch-btn {
   pointer-events: auto;
   position: absolute;
-  /* Sits directly above the right-hand broadside ring — both anchored off
-     the same right edge, so this stays aligned to it at any screen size. */
+  /* Bottom-right corner slot — правый борт moved up to make room (see
+     .broadside-hud--phone), left this open instead of Действие floating
+     above both rings. */
   right: calc(16px + env(safe-area-inset-right, 0px));
-  bottom: calc(20px + env(safe-area-inset-bottom, 0px) + 76px);
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
   width: 52px;
   height: 52px;
   border-radius: 50%;
@@ -2052,13 +2190,19 @@ onBeforeUnmount(() => {
 }
 
 /*
- * .world-page's own box height is left to Quasar's QPage component — it
- * measures the real header height in JS and sizes the page to fit below it,
- * which sidesteps the classic mobile-Safari 100vh problem (100vh alone
- * measures the "address bar hidden" viewport, not what's actually visible,
- * so anything sized or anchored off it — the joystick, the fire buttons —
- * ended up positioned below the real fold). Setting an explicit height here
- * would just fight that JS measurement instead of using it.
+ * .world-page used to leave its height to Quasar's QPage component, which
+ * measures the real header height in JS and sizes the page to fit below it
+ * (min-height: calc(...) as an inline style). That made sense while World
+ * had a header to fit under — it no longer does (MainLayout hides the
+ * header entirely on this route), and that JS-measured, header-relative
+ * calc turned out to be exactly what broke on iOS after an orientation
+ * change (reported as the whole page rendering oversized/blurry after
+ * rotate+reload). position:fixed + 100dvh sidesteps Quasar's measurement
+ * entirely and tracks the actual visible viewport natively — 100dvh in
+ * particular (vs plain 100vh) is what correctly follows the address bar
+ * showing/hiding across an orientation change on iOS Safari/Chrome-iOS.
+ * !important beats QPage's own inline min-height, which Vue still applies
+ * since the component itself is still in use for its other page behavior.
  *
  * .world-frame used to cap itself to a centered, letterboxed box — traded
  * for full-bleed per explicit direction: fullscreen edge-to-edge, HUD
@@ -2069,6 +2213,10 @@ onBeforeUnmount(() => {
 .world-page {
   padding: 0;
   background: var(--c-bg-deep);
+  position: fixed !important;
+  inset: 0;
+  height: 100dvh !important;
+  min-height: 0 !important;
 }
 .world-frame {
   position: absolute;

@@ -1,6 +1,15 @@
 <template>
   <q-layout view="lHh Lpr lFf">
-    <q-header class="app-header">
+    <!--
+      World gets no header at all — it's the one screen where every pixel
+      of vertical space actually matters (see WorldPage.vue's own
+      world-back-btn for how it gets a "back to menu" control instead),
+      and a fixed-position overlay in there (PortModal, ShipInfoOverlay)
+      already has to fight this header for the exact same real estate
+      whenever mobile browser chrome/keyboard shrinks the visible viewport
+      (direct feedback — Уплыть ending up hidden underneath it).
+    -->
+    <q-header v-if="$route.path !== '/world'" class="app-header">
       <q-toolbar>
         <q-btn
           v-if="$route.path !== '/'"

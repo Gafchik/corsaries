@@ -7,7 +7,16 @@
     <meta name="description" content="<%= productDescription %>">
     <meta name="format-detection" content="telephone=no">
     <meta name="msapplication-tap-highlight" content="no">
-    <meta name="viewport" content="width=device-width, initial-scale=1<% if (ctx.mode.cordova || ctx.mode.capacitor) { %>, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover<% } %>">
+    <!--
+      Zoom-lock and viewport-fit=cover used to apply only to cordova/capacitor
+      builds. On the plain web build (what phones actually load), that left
+      the mobile browser's own pinch/auto-zoom free to kick in and get stuck
+      across an orientation change (DOM + canvas both rendered oversized
+      after rotate+reload) — and, separately, meant env(safe-area-inset-*)
+      always evaluated to 0 on the web, silently no-opping every safe-area
+      calc() in the app. Applying both unconditionally fixes both.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
     <!--
       connect-src is deliberately wide open (any http/ws origin) in dev —
       the API/realtime dev-proxy targets are reached by whatever host
