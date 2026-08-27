@@ -1436,11 +1436,20 @@ class WorldScene extends Phaser.Scene {
   updateAiming() {
     const inPort = this.currentNearPortId !== null
     for (const uiSide of ['fireLeft', 'fireRight']) {
-      const held =
-        controls.isDown(uiSide) ||
-        this.gamepadButtonHeld(uiSide) ||
-        controls.isTouchHeld(uiSide) ||
+      // activePointer.leftButtonDown()/rightButtonDown() is a MOUSE
+      // convenience (right hand resting on the mouse, see fireBroadside's
+      // own note on that) — must never fire from a touch pointer, which
+      // Phaser otherwise reports through the exact same "left button"
+      // state. Without wasTouch here, dragging the on-screen joystick (or
+      // just resting a second finger anywhere on the canvas) registered as
+      // a held left-button and fired a broadside on release — touch
+      // already has its own dedicated signal (controls.isTouchHeld, from
+      // the broadside-ring buttons specifically), so this fallback is
+      // gated to real mice only.
+      const mouseHeld =
+        !this.input.activePointer.wasTouch &&
         (uiSide === 'fireLeft' ? this.input.activePointer.leftButtonDown() : this.input.activePointer.rightButtonDown())
+      const held = controls.isDown(uiSide) || this.gamepadButtonHeld(uiSide) || controls.isTouchHeld(uiSide) || mouseHeld
 
       if (held && !inPort) {
         this.drawAimCone(uiSide)

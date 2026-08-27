@@ -41,47 +41,59 @@
             <button v-if="hasCargo" class="mini-btn mini-btn--flat" @click="sellAll">Продать всё</button>
           </div>
           <div v-for="p in market" :key="p.type" class="row">
-            <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" v-html="productIcon(p.type)"></svg></div>
-            <div class="row__main">
-              <div class="row__title">{{ p.name }}</div>
-              <div class="row__sub">{{ p.price }} зол · вес {{ p.weight }} · в наличии {{ p.stock }} · у меня {{ owned(p.type) }}</div>
+            <div class="row__header">
+              <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" v-html="productIcon(p.type)"></svg></div>
+              <div class="row__main">
+                <div class="row__title">{{ p.name }}</div>
+                <div class="row__sub">{{ p.price }} зол · вес {{ p.weight }} · в наличии {{ p.stock }} · у меня {{ owned(p.type) }}</div>
+              </div>
             </div>
-            <input
-              :value="quantities[p.type]"
-              @input="setQuantity(p, $event.target.value)"
-              type="number"
-              inputmode="numeric"
-              min="1"
-              :max="qtyMax(p)"
-              class="qty-input"
-            />
-            <button class="mini-btn" :disabled="quantities[p.type] > p.stock" @click="trade(p.type, 'buy')">Купить</button>
-            <button class="mini-btn mini-btn--flat" :disabled="quantities[p.type] > owned(p.type)" @click="trade(p.type, 'sell')">Продать</button>
+            <div class="row__actions">
+              <input
+                :value="quantities[p.type]"
+                @input="setQuantity(p, $event.target.value)"
+                type="number"
+                inputmode="numeric"
+                min="1"
+                :max="qtyMax(p)"
+                class="qty-input"
+              />
+              <button class="mini-btn" :disabled="quantities[p.type] > p.stock" @click="trade(p.type, 'buy')">Купить</button>
+              <button class="mini-btn mini-btn--flat" :disabled="quantities[p.type] > owned(p.type)" @click="trade(p.type, 'sell')">Продать</button>
+            </div>
           </div>
         </div>
 
         <!-- Верфь -->
         <div v-if="tab === 'shipyard'" class="panel">
           <div v-for="s in shipyard" :key="s.type" class="row">
-            <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="3,10 9,4 13,8 7,14"/><line x1="6" y1="13" x2="12" y2="21"/></svg></div>
-            <div class="row__main">
-              <div class="row__title">{{ s.name }} {{ s.type === ship?.type ? '(текущий)' : '' }}</div>
-              <div class="row__sub">{{ s.price }} зол · HP {{ s.max_hp }} · пушек {{ s.cannon_count }} · экипаж до {{ s.max_sailors }}</div>
+            <div class="row__header">
+              <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="3,10 9,4 13,8 7,14"/><line x1="6" y1="13" x2="12" y2="21"/></svg></div>
+              <div class="row__main">
+                <div class="row__title">{{ s.name }} {{ s.type === ship?.type ? '(текущий)' : '' }}</div>
+                <div class="row__sub">{{ s.price }} зол · HP {{ s.max_hp }} · пушек {{ s.cannon_count }} · экипаж до {{ s.max_sailors }}</div>
+              </div>
             </div>
-            <button class="mini-btn" :disabled="s.type === ship?.type" @click="buyShip(s.type)">Купить</button>
+            <div class="row__actions">
+              <button class="mini-btn" :disabled="s.type === ship?.type" @click="buyShip(s.type)">Купить</button>
+            </div>
           </div>
         </div>
 
         <!-- Таверна -->
         <div v-if="tab === 'tavern'" class="panel">
           <div v-for="s in tavern" :key="s.type" class="row">
-            <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="10" height="11" rx="1"/><path d="M15 10 h3 a3 3 0 0 1 0 6 h-3"/></svg></div>
-            <div class="row__main">
-              <div class="row__title">{{ s.name }}</div>
-              <div class="row__sub">{{ s.price }} зол · на борту {{ ship?.sailors?.[s.type] ?? 0 }}</div>
+            <div class="row__header">
+              <div class="row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="10" height="11" rx="1"/><path d="M15 10 h3 a3 3 0 0 1 0 6 h-3"/></svg></div>
+              <div class="row__main">
+                <div class="row__title">{{ s.name }}</div>
+                <div class="row__sub">{{ s.price }} зол · на борту {{ ship?.sailors?.[s.type] ?? 0 }}</div>
+              </div>
             </div>
-            <button class="mini-btn" @click="hireFire(s.type, 'hire')">Нанять</button>
-            <button class="mini-btn mini-btn--flat" @click="hireFire(s.type, 'fire')">Уволить</button>
+            <div class="row__actions">
+              <button class="mini-btn" @click="hireFire(s.type, 'hire')">Нанять</button>
+              <button class="mini-btn mini-btn--flat" @click="hireFire(s.type, 'fire')">Уволить</button>
+            </div>
           </div>
           <div class="row__sub q-mt-sm">Экипаж: {{ ship?.sailor_count }} / {{ ship?.max_sailors }}</div>
         </div>
@@ -495,6 +507,24 @@ watch(repairAmount, () => nextTick(refreshItems))
   gap: 12px;
   padding: 12px 4px;
   border-bottom: 1px solid var(--c-parchment-border);
+}
+/* Transparent by default — icon/title/price and the qty+buttons flow
+   directly into .row's own single flex line, exactly as if these two
+   wrappers didn't exist (desktop/wide layout, unchanged). Only the narrow
+   breakpoint below turns them into real rows of their own — squeezing
+   icon + title/price + qty input + two buttons onto one line left maybe
+   20px for the text on a phone, wrapping it into an unreadable four-line
+   column (direct feedback/screenshot). */
+.row__header, .row__actions { display: contents; }
+@media (max-width: 480px) {
+  .row { flex-wrap: wrap; row-gap: 8px; }
+  .row__header, .row__actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1 1 100%;
+  }
+  .row__actions { justify-content: flex-end; }
 }
 .row__icon {
   flex: none; width: 34px; height: 34px; border-radius: 8px;
