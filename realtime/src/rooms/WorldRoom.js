@@ -1,7 +1,7 @@
 import { Room } from '@colyseus/core'
-import { ArraySchema } from '@colyseus/schema'
-import { Player, Island, createWorldState } from '../schema/WorldState.js'
-import { loadShip, saveShip, awardBounty, createLootOffer, applyDeathPenalty } from '../db.js'
+import { ArraySchema, MapSchema } from '@colyseus/schema'
+import { Player, Island, CargoDrop, createWorldState } from '../schema/WorldState.js'
+import { loadShip, saveShip, awardBounty, applyDeathPenalty, claimCargoProducts } from '../db.js'
 import { verifyToken, laravelPost, laravelGetPorts } from '../auth.js'
 import { generateIslands } from '../worldgen.js'
 
@@ -25,10 +25,6 @@ const AUTOSAVE_INTERVAL_MS = 10000
 // cargo hold, so this is what a merchant of that size is assumed to be
 // carrying, rolled fresh at the moment it goes down.
 const PRODUCT_TYPES = ['rum', 'silk', 'water', 'food', 'leather', 'wood', 'tobacco', 'coffee']
-// "Sinking" isn't "vanishing" — most of the hold floats or beaches nearby.
-// This is how much of it is lost, not how much survives (see DECK notes).
-const LOOT_LOSS_MIN = 0.15
-const LOOT_LOSS_MAX = 0.35
 
 // A human sinking loses a slice of gold/cargo/crew and respawns at a random
 // port, not full-HP at the map center — same "sinking costs something real"
@@ -67,6 +63,13 @@ const ABORDAGE_RANGE = 70
 // safe-zone that's tighter than the client's own "enter port" prompt radius
 // would mean a ship could be shown the button while still getting shot at.
 const PORT_ENTER_RANGE = 220
+
+// A sunk ship's gold + cargo floats here instead of landing straight in the
+// killer's account — see spawnCargoDrop/tickCargoDrops. Pickup range is
+// generous next to ABORDAGE_RANGE's "вплотную" since this is a race to
+// reach a fixed point, not a lunge at a moving target.
+const CARGO_PICKUP_RANGE = 140
+const CARGO_DROP_TTL_MS = 60000
 // A cannonball is now a real object that travels and can miss — see
 // tickCannonballs(). Speed must match CANNONBALL_SPEED in WorldPage.vue: the
 // client's own blind visual tween and the server's actual hit-resolution
@@ -169,6 +172,12 @@ export class WorldRoom extends Room {
     this.botRuntime = new Map() // botId -> { mode, headingChangedAt }
     this.botCounter = 0
     this.cannonballs = [] // in-flight balls — see tickCannonballs()
+    this.cargoDropCounter = 0
+    // Serializes claims per-drop across the async DB round-trip in
+    // claimCargoDrop — without it, two players detected within the same
+    // tick (before either's await resolves) could both be granted the same
+    // still-full crate. Plain JS Set, not synced state — purely a lock.
+    this.dropsBeingClaimed = new Set()
 
     // Not awaited — bots simply won't respect port safe zones for the
     // handful of milliseconds until this resolves, harmless at room start.
@@ -210,6 +219,7 @@ export class WorldRoom extends Room {
     this.setSimulationInterval((deltaMs) => {
       this.tickBots(deltaMs)
       this.tickCannonballs(deltaMs)
+      this.tickCargoDrops()
     })
     this.clock.setInterval(() => this.autosaveHumans(), AUTOSAVE_INTERVAL_MS)
   }
@@ -409,21 +419,21 @@ export class WorldRoom extends Room {
   /**
    * A bot has no persisted hold — this is what a merchant of that tier is
    * assumed to be carrying, rolled at the moment it sinks. 2-4 of the 8
-   * product types, quantity scaled by tier, then reduced by whatever the
-   * sinking cost (LOOT_LOSS_MIN..MAX lost, not survived — see the constant
-   * comment) before it's ever offered.
+   * product types, quantity scaled by tier. Every bot death now drops the
+   * whole thing into a CargoDrop for whoever reaches it first (see
+   * resolveHit) rather than a private instant reward, so there's no
+   * LOOT_LOSS reduction anymore — that existed to make a free, guaranteed,
+   * un-contested reward feel less free; a race for a 60-second floating
+   * crate already costs something (getting there first).
    */
   generateBotCargo(tier) {
     const shuffled = [...PRODUCT_TYPES].sort(() => Math.random() - 0.5)
     const productCount = 2 + Math.floor(Math.random() * 3)
-    const lossFraction = LOOT_LOSS_MIN + Math.random() * (LOOT_LOSS_MAX - LOOT_LOSS_MIN)
-    const survivalFraction = 1 - lossFraction
 
     const items = {}
     for (const type of shuffled.slice(0, productCount)) {
-      const fullAmount = (5 + Math.floor(Math.random() * 16)) * (tier + 1)
-      const survived = Math.round(fullAmount * survivalFraction)
-      if (survived > 0) items[type] = survived
+      const amount = (5 + Math.floor(Math.random() * 16)) * (tier + 1)
+      if (amount > 0) items[type] = amount
     }
     return items
   }
@@ -735,37 +745,35 @@ export class WorldRoom extends Room {
     }
 
     if (target.hp <= 0) {
+      // Both branches below used to hand a reward straight to whoever's
+      // credited as the attacker (instant bounty, a private loot_offer
+      // route) — now it's a CargoDrop at the death spot instead, race-able
+      // by anyone who gets there within CARGO_DROP_TTL_MS, attacker
+      // included but not guaranteed. See spawnCargoDrop/tickCargoDrops.
+      const deathX = target.x
+      const deathY = target.y
+
       if (target.isBot) {
         this.broadcast('sunk', { targetId })
-        // Naval combat was otherwise a pure cost (cannonballs are free,
-        // but sinking a bot bought nothing) — same reasoning as abordage
-        // loot: winning a fight should be the actual income, not a
-        // random-walk market that's a coin flip either way.
-        if (!attacker.isBot) {
-          const tier = SHIP_TYPES.indexOf(target.shipType)
-          // Was (30-80) * (tier+1) — a boat's own 30-80 gold barely covered
-          // a fifth of repairing the 500 HP it took to sink it, no real
-          // reason to bother at the bottom of the tier ladder. 5x base and
-          // width — a boat's now a real (if modest) 150-250, not a rounding
-          // error next to a battleship's own payout.
-          const bounty = (Math.floor(Math.random() * 101) + 150) * (Math.max(0, tier) + 1)
-          awardBounty(attacker.userId, bounty).catch((e) => console.error('awardBounty failed', e))
-          this.broadcast('bounty', { attackerId, targetId, amount: bounty })
-
-          const items = this.generateBotCargo(Math.max(0, tier))
-          if (Object.keys(items).length > 0) {
-            createLootOffer(attacker.userId, items)
-              .then((offerId) => this.broadcast('loot_available', { attackerId, offerId }))
-              .catch((e) => console.error('createLootOffer failed', e))
-          }
-        }
+        // Every bot death drops something now, regardless of who (or what)
+        // landed the killing blow — a bot killed by another bot used to
+        // reward nobody at all, which is most bot deaths, most of the time.
+        const tier = Math.max(0, SHIP_TYPES.indexOf(target.shipType))
+        // Was instant (30-80)*(tier+1) straight to the attacker's account —
+        // now it's what the crate carries, race-able by anyone, same as
+        // the cargo. 5x base and width from the old instant version, since
+        // getting there first now costs something an instant credit didn't.
+        const gold = (Math.floor(Math.random() * 101) + 150) * (tier + 1)
+        this.spawnCargoDrop(deathX, deathY, gold, this.generateBotCargo(tier))
         this.respawnBotLater(targetId)
       } else {
-        // Sinking costs something real — same "survival fraction" framing
-        // as bot loot (see generateBotCargo/LOOT_LOSS_MIN/MAX): 5-15% of
-        // gold, cargo, and crew each, not "what's left" being that range.
+        // Sinking costs something real — 5-15% of gold, cargo, and crew
+        // each, not "what's left" being that range (see DEATH_LOSS_MIN/MAX).
+        // The lost gold/cargo (not the crew) becomes the drop.
         const survivalFraction = 1 - (DEATH_LOSS_MIN + Math.random() * (DEATH_LOSS_MAX - DEATH_LOSS_MIN))
-        applyDeathPenalty(target.userId, survivalFraction).catch((e) => console.error('applyDeathPenalty failed', e))
+        applyDeathPenalty(target.userId, survivalFraction)
+          .then(({ lostGold, lostProducts }) => this.spawnCargoDrop(deathX, deathY, lostGold, lostProducts))
+          .catch((e) => console.error('applyDeathPenalty failed', e))
 
         const port = this.ports[Math.floor(Math.random() * this.ports.length)]
         target.hp = Math.floor(target.maxHp * DEATH_RESPAWN_HP_FRACTION)
@@ -775,5 +783,102 @@ export class WorldRoom extends Room {
         this.broadcast('sunk', { targetId, respawnHp: target.hp, respawnX: target.x, respawnY: target.y })
       }
     }
+  }
+
+  /** Drops nothing if there's actually nothing to drop (a stripped-bare ship, or a bot cargo roll that happened to net zero). */
+  spawnCargoDrop(x, y, gold, products) {
+    const hasProducts = Object.values(products).some((qty) => qty > 0)
+    if (gold <= 0 && !hasProducts) return
+
+    const id = `drop-${this.cargoDropCounter++}`
+    const drop = new CargoDrop()
+    drop.x = x
+    drop.y = y
+    drop.gold = Math.max(0, gold)
+    drop.goldClaimed = gold <= 0
+    drop.spawnedAt = Date.now()
+    drop.products = new MapSchema()
+    for (const [type, qty] of Object.entries(products)) {
+      if (qty > 0) drop.products.set(type, qty)
+    }
+    this.state.cargoDrops.set(id, drop)
+  }
+
+  /** TTL expiry + proximity-based pickup, one pass per simulation tick. */
+  tickCargoDrops() {
+    const now = Date.now()
+    for (const [id, drop] of this.state.cargoDrops.entries()) {
+      if (now - drop.spawnedAt > CARGO_DROP_TTL_MS) {
+        this.state.cargoDrops.delete(id)
+        continue
+      }
+      // Bots deliberately never pick these up — a bot has no real account
+      // for gold to land in or a persisted hold for cargo to land in, and
+      // letting them scoop drops before a human arrives would undercut the
+      // entire point of this being a race.
+      for (const [sessionId, player] of this.state.players.entries()) {
+        if (player.isBot) continue
+        if (Math.hypot(player.x - drop.x, player.y - drop.y) > CARGO_PICKUP_RANGE) continue
+        this.claimCargoDrop(id, sessionId, player)
+      }
+    }
+  }
+
+  /**
+   * Locked per-drop (see dropsBeingClaimed) for the duration of the async
+   * DB round-trip — otherwise a second player detected in the same tick,
+   * before this one's award/claim queries resolve, could be granted the
+   * same still-full gold/products. Gold and products are still claimed
+   * independently of each other: arriving after the gold's already gone
+   * still gets a shot at whatever cargo remains, and vice versa.
+   */
+  claimCargoDrop(id, sessionId, player) {
+    if (this.dropsBeingClaimed.has(id)) return
+    const drop = this.state.cargoDrops.get(id)
+    if (!drop) return
+
+    const wantsGold = !drop.goldClaimed && drop.gold > 0
+    const wanted = {}
+    for (const [type, qty] of drop.products.entries()) {
+      if (qty > 0) wanted[type] = qty
+    }
+    if (!wantsGold && Object.keys(wanted).length === 0) return
+
+    this.dropsBeingClaimed.add(id)
+    this.claimCargoDropAsync(id, sessionId, player, wantsGold ? drop.gold : 0, wanted)
+      .catch((e) => console.error('claimCargoDrop failed', e))
+      .finally(() => this.dropsBeingClaimed.delete(id))
+  }
+
+  async claimCargoDropAsync(id, sessionId, player, goldToClaim, wanted) {
+    const claimedGold = goldToClaim
+    if (claimedGold > 0) await awardBounty(player.userId, claimedGold)
+
+    const takenProducts = Object.keys(wanted).length > 0 ? await claimCargoProducts(player.userId, wanted) : {}
+
+    // Re-read — the drop could have fully expired (TTL) while the above
+    // was in flight; nothing left to deplete or notify about either way.
+    const drop = this.state.cargoDrops.get(id)
+    if (!drop) return
+
+    if (claimedGold > 0) {
+      drop.gold = 0
+      drop.goldClaimed = true
+    }
+    let anyTaken = claimedGold > 0
+    for (const [type, takenQty] of Object.entries(takenProducts)) {
+      if (takenQty <= 0) continue
+      anyTaken = true
+      const remaining = (drop.products.get(type) ?? 0) - takenQty
+      if (remaining <= 0) drop.products.delete(type)
+      else drop.products.set(type, remaining)
+    }
+
+    if (anyTaken) {
+      this.clients.find((c) => c.sessionId === sessionId)?.send('cargo_claimed', { gold: claimedGold, products: takenProducts })
+    }
+
+    const productsLeft = [...drop.products.values()].some((qty) => qty > 0)
+    if (drop.goldClaimed && !productsLeft) this.state.cargoDrops.delete(id)
   }
 }

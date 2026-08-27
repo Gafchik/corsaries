@@ -27,15 +27,32 @@ defineTypes(Island, {
   points: ['number'], // shore radius sampled around the circle — see genShore
 })
 
+// A sunk ship's gold + cargo, floating in the world instead of an instant
+// private reward — see resolveHit/spawnCargoDrop in WorldRoom.js. Gold is
+// claimed whole by whoever reaches it first; products drain by whatever
+// fits each claimer's own remaining cargo space, so a drop bigger than one
+// hold can be split between several players (or the same one, twice).
+export class CargoDrop extends Schema {}
+defineTypes(CargoDrop, {
+  x: 'number',
+  y: 'number',
+  gold: 'number',
+  goldClaimed: 'boolean',
+  products: { map: 'number' }, // productType -> quantity still unclaimed
+  spawnedAt: 'number', // Date.now() ms — client derives the radial timer from this, not a synced countdown
+})
+
 export class WorldState extends Schema {}
 defineTypes(WorldState, {
   players: { map: Player },
   islands: [Island],
+  cargoDrops: { map: CargoDrop },
 })
 
 export function createWorldState() {
   const state = new WorldState()
   state.players = new MapSchema()
   state.islands = new ArraySchema()
+  state.cargoDrops = new MapSchema()
   return state
 }

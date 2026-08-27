@@ -62,6 +62,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { Notify } from 'quasar'
 import Phaser from 'phaser'
 import { getStateCallbacks } from 'colyseus.js'
 import { joinWorld } from '@/services/realtime'
@@ -154,6 +155,12 @@ const CANNONBALL_SPEED = 600 // px/s
 // 'fire' rather than telling the client to correct its guess.
 const FIRE_COOLDOWN_MS = 900
 
+// Keep in sync with CARGO_DROP_TTL_MS in realtime/src/rooms/WorldRoom.js —
+// purely cosmetic here (the server deletes the drop from state on its own
+// schedule regardless of what this draws), just needs to agree so the ring
+// hits empty around the same moment the crate actually disappears.
+const CARGO_DROP_TTL_MS = 60000
+
 // Must match SHORE_POINT_COUNT in realtime/src/worldgen.js — how many
 // boundary samples each synced island's `points` array carries.
 const SHORE_POINT_COUNT = 16
@@ -167,6 +174,12 @@ const SHIP_TYPE_NAMES = {
   frigate: 'Фрегат', galleon: 'Галеон', corvette: 'Корвет', battleship: 'Линкор',
 }
 const NAME_TEXT_STYLE = { fontSize: '12px', color: '#ffffff', stroke: '#0a1f28', strokeThickness: 3 }
+// Keep in sync with config/products.php's 'name' field — used only for the
+// Notify toast text on a cargo pickup (see onCargoClaimed).
+const PRODUCT_NAMES = {
+  rum: 'Ром', silk: 'Шёлк', water: 'Вода', food: 'Еда',
+  leather: 'Кожа', wood: 'Дерево', tobacco: 'Табак', coffee: 'Кофе',
+}
 const HP_BAR_WIDTH = 36
 const HP_BAR_HEIGHT = 5
 // Between the ship and its name label (name sits at -28) — reads as
@@ -231,7 +244,7 @@ class WorldScene extends Phaser.Scene {
     this.onNearPortChange = data.onNearPortChange
     this.onNearBotChange = data.onNearBotChange
     this.onNearHumanChange = data.onNearHumanChange
-    this.onLootAvailable = data.onLootAvailable
+    this.onCargoClaimed = data.onCargoClaimed
     this.onAbordageStarted = data.onAbordageStarted
     this.onActionPress = data.onActionPress
     this.onFireBroadside = data.onFireBroadside
@@ -339,6 +352,20 @@ class WorldScene extends Phaser.Scene {
     )
     sparkTexture.generateTexture('damage-spark', 16, 16)
     sparkTexture.destroy()
+
+    // Floating cargo crate — same wood/gold-strap look as the crate icon
+    // already used for the market tab elsewhere in the UI, just as a real
+    // world sprite instead of an inline SVG.
+    const crateTexture = this.make.graphics({ x: 0, y: 0 })
+    crateTexture.fillStyle(0xc9a86a, 1)
+    crateTexture.fillRect(2, 6, 28, 22)
+    crateTexture.lineStyle(2, 0x4a3820, 1)
+    crateTexture.strokeRect(2, 6, 28, 22)
+    crateTexture.lineStyle(2, 0xd9a441, 1)
+    crateTexture.lineBetween(2, 17, 30, 17)
+    crateTexture.lineBetween(16, 6, 16, 28)
+    crateTexture.generateTexture('cargo-crate', 32, 32)
+    crateTexture.destroy()
 
     // Pill-shaped HP bars — Phaser's plain Rectangle game object can't do
     // rounded corners, so the bg/fill are baked once as small rounded-rect
@@ -490,6 +517,7 @@ class WorldScene extends Phaser.Scene {
 
     this.lastMoveSentAt = 0
     this.otherShips = new Map()
+    this.cargoDropSprites = new Map() // dropId -> { crate, ring, x, y, spawnedAt }
     this.activeCannonballs = new Map() // attackerId -> in-flight ball sprite
     // Guards fireBroadside below — mashing fire mid-reload used to still
     // reset the HUD ring's animation (via onFireBroadside) even though no
@@ -598,6 +626,23 @@ class WorldScene extends Phaser.Scene {
       this.otherShips.delete(sessionId)
     })
 
+    // The ring is redrawn every frame in update() (see cargoDropSprites),
+    // not here — its shape depends on elapsed time, not on anything this
+    // onAdd callback knows yet.
+    $(this.room.state).cargoDrops.onAdd((drop, id) => {
+      const crate = this.add.image(drop.x, drop.y, 'cargo-crate').setDepth(3)
+      const ring = this.add.graphics().setDepth(4)
+      this.minimapCam.ignore([crate, ring])
+      this.cargoDropSprites.set(id, { crate, ring, x: drop.x, y: drop.y, spawnedAt: drop.spawnedAt })
+    })
+
+    $(this.room.state).cargoDrops.onRemove((drop, id) => {
+      const entry = this.cargoDropSprites.get(id)
+      entry?.crate.destroy()
+      entry?.ring.destroy()
+      this.cargoDropSprites.delete(id)
+    })
+
     this.room.onMessage('fired', ({ attackerId, side }) => this.spawnCannonball(attackerId, side))
 
     this.room.onMessage('hit', ({ attackerId, targetId, damage, hp }) => {
@@ -634,15 +679,11 @@ class WorldScene extends Phaser.Scene {
       this.hpText.setText(`HP: ${respawnHp}/${this.myMaxHp} (потоплен, респавн у порта)`)
     })
 
-    this.room.onMessage('bounty', ({ attackerId, amount }) => {
-      if (attackerId !== mySessionId) return
-      const toast = this.add.text(this.ship.x, this.ship.y - 40, `+${amount} золота`, { fontSize: '14px', color: '#ffe08a' }).setOrigin(0.5)
-      this.tweens.add({ targets: toast, y: toast.y - 30, alpha: 0, duration: 1200, onComplete: () => toast.destroy() })
-    })
-
-    this.room.onMessage('loot_available', ({ attackerId, offerId }) => {
-      if (attackerId === mySessionId) this.onLootAvailable(offerId)
-    })
+    // Naval-kill loot is a floating CargoDrop now (see spawnCargoDrop in
+    // WorldRoom.js), not an instant private reward — this only fires once
+    // this specific client actually reached and claimed one (server-side,
+    // see claimCargoDrop), never just for landing the killing blow.
+    this.room.onMessage('cargo_claimed', ({ gold, products }) => this.onCargoClaimed(gold, products))
 
     // Sent directly to both participants (not broadcast) — see
     // startPvpAbordage in WorldRoom.js. No accept/decline: both clients
@@ -792,6 +833,18 @@ class WorldScene extends Phaser.Scene {
     this.checkNearPort()
     this.checkNearBot()
     this.checkNearHuman()
+
+    // A radial "loading circle" countdown, not digits — redrawn every
+    // frame since its shape (not just its position) changes over time.
+    // Position never changes (crates are stationary), only the arc.
+    for (const entry of this.cargoDropSprites.values()) {
+      const fraction = Math.max(0, 1 - (Date.now() - entry.spawnedAt) / CARGO_DROP_TTL_MS)
+      entry.ring.clear()
+      entry.ring.lineStyle(3, 0xf0c96b, 0.9)
+      entry.ring.beginPath()
+      entry.ring.arc(entry.x, entry.y - 24, 12, -Math.PI / 2, -Math.PI / 2 + fraction * Math.PI * 2, false)
+      entry.ring.strokePath()
+    }
   }
 
   /**
@@ -1085,6 +1138,20 @@ async function toggleInfo() {
 // range at once: a fight (human, then bot) before casually strolling into
 // port — tight-range combat proximity is rarer and more deliberate than
 // just happening to be within the wide port radius too.
+// Only ever fires for gold/products THIS client actually reached and
+// claimed (see claimCargoDrop in WorldRoom.js) — never just for landing
+// the killing blow, so there's no "someone else beat you to it" case to
+// silently handle here; if nothing was claimed, nothing is sent at all.
+function notifyCargoClaimed(gold, products) {
+  const parts = []
+  if (gold > 0) parts.push(`${gold} золота`)
+  for (const [type, qty] of Object.entries(products || {})) {
+    if (qty > 0) parts.push(`${PRODUCT_NAMES[type] ?? type} ×${qty}`)
+  }
+  if (parts.length === 0) return
+  Notify.create({ type: 'positive', message: `Вы подобрали груз: ${parts.join(', ')}`, position: 'top' })
+}
+
 function performAction() {
   if (nearHuman.value) challengeHuman()
   else if (nearBot.value) enterAbordage()
@@ -1148,7 +1215,7 @@ onMounted(async () => {
     onNearPortChange: (port) => { nearPort.value = port },
     onNearBotChange: (bot) => { nearBot.value = bot },
     onNearHumanChange: (human) => { nearHuman.value = human },
-    onLootAvailable: (offerId) => { router.push(`/loot/${offerId}`) },
+    onCargoClaimed: notifyCargoClaimed,
     onAbordageStarted: (abordageId) => { router.push(`/abordage/${abordageId}`) },
     onActionPress: performAction,
     onInventoryPress: toggleInfo,
