@@ -925,8 +925,19 @@ export class WorldRoom extends Room {
   fleeStep(bot, runtime, threat, deltaMs) {
     runtime.mode = 'flee'
     const port = this.nearestPortWithin(bot, BOT_FLEE_PORT_SEARCH_RANGE)
+    // port.x/y sit on the shore itself (the marker position — see the
+    // ports.then() comment in onCreate), not somewhere a ship can actually
+    // be. Steering straight at it meant the "obstacle" pickHeadingToward
+    // kept trying to route around was the destination itself — as the bot
+    // closed in, every heading near the goal eventually read blocked too,
+    // leaving it weaving right at the island's edge instead of arriving
+    // (direct feedback: bots fleeing to port getting stuck on the island).
+    // spawnX/spawnY is the same pre-computed clear-water point players
+    // respawn at — aim there instead.
+    const goalX = port ? (port.spawnX ?? port.x) : null
+    const goalY = port ? (port.spawnY ?? port.y) : null
     const goalHeading = port
-      ? Math.atan2(port.y - bot.y, port.x - bot.x) + Math.PI / 2
+      ? Math.atan2(goalY - bot.y, goalX - bot.x) + Math.PI / 2
       : Math.atan2(bot.y - threat.y, bot.x - threat.x) + Math.PI / 2
     // The straight-line heading toward safety used to be all this did — a
     // port sitting behind an island (or just an island in the way of
