@@ -210,21 +210,25 @@ class Controls {
   }
 
   /**
-   * Free-aim direction, continuous — a gamepad's right stick or the
-   * on-screen aim stick (see TouchJoystick's 'aim' variant), read every
-   * frame by WorldScene's updateAiming the same way getMoveVector already
-   * reads movement input. Unlike movement, gamepad and touch are never
-   * combined here (a phone with a gamepad paired hides the on-screen stick
-   * entirely — see showTouchControls — so only one is ever actually live);
-   * whichever is past its deadzone simply wins.
+   * Gamepad right-stick aim direction, continuous — read every frame by
+   * WorldScene's updateAiming for the preview cone. Deliberately NOT
+   * combined with the on-screen aim stick the way getMoveVector combines
+   * every movement source: a gamepad fires on a separate dedicated button
+   * (see the 'fire' action) while the on-screen stick fires on release,
+   * same gesture as a held mouse button (see getTouchAimVector) — the two
+   * need to stay distinguishable, not merged into one "whichever's active"
+   * vector the way movement can afford to be.
    */
-  getAimVector() {
+  getGamepadAimVector() {
     const pad = this.firstGamepad()
-    if (pad) {
-      const sx = pad.axes[2] ?? 0
-      const sy = pad.axes[3] ?? 0
-      if (Math.hypot(sx, sy) > STICK_DEADZONE) return { x: sx, y: sy }
-    }
+    if (!pad) return { x: 0, y: 0 }
+    const sx = pad.axes[2] ?? 0
+    const sy = pad.axes[3] ?? 0
+    return Math.hypot(sx, sy) > STICK_DEADZONE ? { x: sx, y: sy } : { x: 0, y: 0 }
+  }
+
+  /** On-screen aim stick's current drag position (see TouchJoystick's 'aim' variant / setAimVector), both already in [-1, 1]. Held-to-preview, released-to-fire — same gesture as a held mouse button, unlike the gamepad's separate-button scheme (see getGamepadAimVector's own comment). */
+  getTouchAimVector() {
     return { x: this.aimVector.x, y: this.aimVector.y }
   }
 
@@ -232,11 +236,6 @@ class Controls {
   setAimVector(x, y) {
     this.aimVector.x = x
     this.aimVector.y = y
-  }
-
-  /** True while the on-screen aim stick (touch only — see setAimVector) is actively pushed — lets the touch Действие button double as the fire trigger only while there's actually a deliberate aim direction to fire toward, see WorldPage.vue's touch-controls template. */
-  isAimStickActive() {
-    return Math.hypot(this.aimVector.x, this.aimVector.y) > STICK_DEADZONE
   }
 
   /** A touch button standing in for a discrete keypress/gamepad-button press — same emit() path, same listeners. */

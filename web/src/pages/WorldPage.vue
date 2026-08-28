@@ -70,18 +70,19 @@
            gets on-screen sticks + buttons instead of relying on
            WASD/mouse/gamepad. Sits above the canvas, so a tap here never
            also reaches the canvas's own pointerdown-aims handler below.
-           Left stick moves, right stick aims (continuously previews the hit
-           cone while pushed — see updateAiming), Действие doubles as the
-           fire trigger while the aim stick is active (see
-           handleTouchActionOrFire) and its own reload progress otherwise —
-           direct sketch/request. Инвент sits alone in the opposite top
-           corner from the exit button, the only on-screen way to open the
+           Left stick moves, right stick aims — hold to preview the hit
+           cone, release to fire, same gesture as a held mouse button (see
+           updateAiming) — Действие stays its plain context-action self, its
+           own reload progress shown via the same background style anyway.
+           Инвент sits alone in the opposite top corner from the exit
+           button, offset below the minimap's own top-right footprint (see
+           .touch-inventory-btn) — the only on-screen way to open the
            inventory on a phone (keyboard I / gamepad Y have no touch
            equivalent otherwise). -->
       <div v-if="showTouchControls && !activePortId" class="touch-controls">
         <TouchJoystick class="touch-controls__stick" />
         <TouchJoystick class="touch-controls__aim-stick" variant="aim" />
-        <button class="touch-btn" :style="broadsideRingStyle(reloadFraction)" @pointerdown.prevent="handleTouchActionOrFire">Действие</button>
+        <button class="touch-btn" :style="broadsideRingStyle(reloadFraction)" @pointerdown.prevent="controls.touchPress('action')">Действие</button>
         <button class="touch-inventory-btn" @pointerdown.prevent="controls.touchPress('inventory')" aria-label="Инвентарь">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5V8z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>
         </button>
@@ -777,15 +778,14 @@ class WorldScene extends Phaser.Scene {
     this.lastBroadsideFiredAt = 0
 
     // Free aim: mouse/gamepad-stick/touch-stick continuously feed an aim
-    // angle (see updateAiming), previewed as a hit-zone cone, fired on
-    // whichever trigger fits the device (mouse release, a discrete gamepad
-    // button, or the touch Действие button while the aim stick is pushed —
-    // see the 'fire' onPress handler and the touch-controls template).
-    // lastKnownRange starts at the boat default and gets corrected the
-    // instant this player's own first 'fired' broadcast arrives (see
-    // setupNetworking) — close enough for the very first aim before that,
-    // and exact for every one after.
-    this.wasMouseAimHeld = false
+    // angle (see updateAiming), previewed as a hit-zone cone. Mouse and the
+    // touch stick fire on release (wasReleasableHeld tracks that edge); a
+    // gamepad's stick is preview-only, fired instead by its own dedicated
+    // button (see fireFreeAimButton). lastKnownRange starts at the boat
+    // default and gets corrected the instant this player's own first
+    // 'fired' broadcast arrives (see setupNetworking) — close enough for
+    // the very first aim before that, and exact for every one after.
+    this.wasReleasableHeld = false
     this.currentAimAngle = 0
     this.lastKnownRange = DEFAULT_AIM_RANGE
     // Set by setInputLocked (see WorldPage.vue's activePortId watch) while
@@ -1456,19 +1456,20 @@ class WorldScene extends Phaser.Scene {
   }
 
   /**
-   * Gamepad 'fire' button / touch Действие-as-fire (see the 'fire' onPress
-   * handler and the touch-controls template) — a discrete press, not a
-   * hold/release like the mouse, so it fires toward whatever the aim stick
-   * currently points at, or straight ahead if it's centered (pressing fire
-   * without bothering to aim should still do something reasonable, not
-   * nothing). Blocked in port territory same as the mouse path.
+   * Gamepad 'fire' button only (see the 'fire' onPress handler) — a
+   * discrete press, so it fires toward whatever the right stick currently
+   * points at, or straight ahead if it's centered (pressing fire without
+   * bothering to aim should still do something reasonable, not nothing).
+   * Touch never reaches this — the on-screen aim stick fires on release
+   * instead, same gesture as the mouse (see updateAiming). Blocked in port
+   * territory same as every other fire path.
    */
   fireFreeAimButton() {
     if (this.currentNearPortId !== null) {
       this.onActionRejected?.('Нельзя стрелять на территории порта')
       return
     }
-    const stick = controls.getAimVector()
+    const stick = controls.getGamepadAimVector()
     const angle = Math.hypot(stick.x, stick.y) > STICK_AIM_DEADZONE
       ? Math.atan2(stick.y, stick.x)
       : this.ship.rotation - Math.PI / 2 // ship's own forward direction — see the rotation convention note server-side (approachStep)
@@ -1476,23 +1477,26 @@ class WorldScene extends Phaser.Scene {
   }
 
   /**
-   * Free-aim polling, run every frame from update(). Two independent
-   * trigger shapes share one preview cone:
-   *  - Mouse: hold left button, cone follows the world cursor position,
-   *    release fires toward wherever it last pointed (fireFree above).
-   *  - Gamepad right stick / on-screen aim stick: cone follows the stick
-   *    continuously, no button needed just to preview it — firing is a
-   *    separate discrete press (see fireFreeAimButton), not tied to this at
-   *    all, since a stick recentering isn't a deliberate "let go to shoot"
-   *    gesture the way releasing a held mouse button is.
+   * Free-aim polling, run every frame from update(). Two trigger shapes
+   * share one preview cone:
+   *  - "Held" sources — mouse and the on-screen aim stick — fire on
+   *    release, the same real-trigger gesture either way: hold to preview,
+   *    let go to shoot (direct feedback: a discrete Действие-press-while-
+   *    aiming, tried first, didn't read as the same gesture as the mouse
+   *    and nothing fired on releasing the stick — this replaces that).
+   *  - Gamepad's right stick is continuous preview only, no release-fire —
+   *    it has its own dedicated button instead (see fireFreeAimButton),
+   *    since a player holding a steady aim on a gamepad generally wants to
+   *    fire more than once without letting go of the stick, unlike a
+   *    thumb leaving an on-screen stick or a mouse button coming up.
    *
    * Firing is blocked in port territory (see isNearAnyPort in WorldRoom.js)
    * — this.currentNearPortId (set by checkNearPort, run just before this
    * every frame) is this client's own copy of that same check. While
-   * docked, neither source draws a cone (there'd be nothing honest to show
-   * — the server will refuse the shot regardless of where it's aimed), and
-   * a mouse release shows a toast instead of actually firing, so mashing
-   * the button in port never sends a single 'fire' the server would've had
+   * docked, no source draws a cone (there'd be nothing honest to show — the
+   * server will refuse the shot regardless of where it's aimed), and
+   * releasing a held source shows a toast instead of actually firing, so
+   * mashing it in port never sends a single 'fire' the server would've had
    * to silently drop, and the reload ring never fakes a shot that didn't
    * happen (see fireFree's own note on that exact desync).
    */
@@ -1504,12 +1508,15 @@ class WorldScene extends Phaser.Scene {
     // anywhere on the canvas) read as a held mouse button and fired on
     // release. Touch has its own dedicated aim source (the stick) below.
     const mouseHeld = !this.input.activePointer.wasTouch && this.input.activePointer.leftButtonDown()
-    const stick = controls.getAimVector()
-    const stickActive = Math.hypot(stick.x, stick.y) > STICK_AIM_DEADZONE
+    const touchStick = controls.getTouchAimVector()
+    const touchHeld = Math.hypot(touchStick.x, touchStick.y) > STICK_AIM_DEADZONE
+    const gamepadStick = controls.getGamepadAimVector()
+    const gamepadActive = Math.hypot(gamepadStick.x, gamepadStick.y) > STICK_AIM_DEADZONE
 
     let angle = null
     if (mouseHeld) angle = Math.atan2(this.input.activePointer.worldY - this.ship.y, this.input.activePointer.worldX - this.ship.x)
-    else if (stickActive) angle = Math.atan2(stick.y, stick.x)
+    else if (touchHeld) angle = Math.atan2(touchStick.y, touchStick.x)
+    else if (gamepadActive) angle = Math.atan2(gamepadStick.y, gamepadStick.x)
 
     if (angle !== null && !inPort) {
       this.currentAimAngle = angle
@@ -1518,27 +1525,29 @@ class WorldScene extends Phaser.Scene {
       this.aimCone.clear()
     }
 
-    if (!mouseHeld && this.wasMouseAimHeld) {
+    const releasableHeld = mouseHeld || touchHeld
+    if (!releasableHeld && this.wasReleasableHeld) {
       if (inPort) this.onActionRejected?.('Нельзя стрелять на территории порта')
       else this.fireFree(this.currentAimAngle)
     }
-    this.wasMouseAimHeld = mouseHeld
+    this.wasReleasableHeld = releasableHeld
   }
 
   /**
    * Called from WorldPage.vue's activePortId watch — true while PortModal
-   * is open. Resets wasMouseAimHeld on lock so a mouse press that was
-   * mid-hold the instant the modal opened doesn't read as a "release" (and
-   * fire) the moment it's unlocked again; movement/aiming/firing themselves
-   * are skipped in update() while this is true (see the inputLocked check
-   * there), this just handles the immediate visual cleanup.
+   * is open. Resets wasReleasableHeld on lock so a mouse/touch press that
+   * was mid-hold the instant the modal opened doesn't read as a "release"
+   * (and fire) the moment it's unlocked again; movement/aiming/firing
+   * themselves are skipped in update() while this is true (see the
+   * inputLocked check there), this just handles the immediate visual
+   * cleanup.
    */
   setInputLocked(locked) {
     this.inputLocked = locked
     if (!locked) return
     this.ship.setVelocity(0, 0)
     this.aimCone.clear()
-    this.wasMouseAimHeld = false
+    this.wasReleasableHeld = false
   }
 
   /**
@@ -1913,17 +1922,6 @@ function performAction() {
   else if (nearBot.value) enterAbordage()
 }
 
-// The touch Действие button doubles as the free-aim fire trigger (see
-// controls.isAimStickActive/WorldScene.fireFreeAimButton) whenever the
-// on-screen aim stick is actually pushed — there's no separate dedicated
-// fire button on a phone (see the sketch this touch-controls layout
-// follows), it's the same button, just contextual. Falls through to its
-// normal job (performAction) the rest of the time, same as it always did.
-function handleTouchActionOrFire() {
-  if (controls.isAimStickActive()) game?.scene.getScene('world')?.fireFreeAimButton()
-  else controls.touchPress('action')
-}
-
 // Same priority as performAction() above, by construction — this only
 // decides what the notice SAYS, performAction alone decides what pressing
 // Действие actually DOES, so the two can never disagree with each other.
@@ -2183,11 +2181,19 @@ onBeforeUnmount(() => {
   background: rgba(6, 20, 24, 0.6);
 }
 /* Opposite top corner from .world-exit-btn — same small round icon-button
-   treatment, the only on-screen way to open the inventory on a phone. */
+   treatment, the only on-screen way to open the inventory on a phone.
+   Offset well below the minimap's own top-right corner (minimapLayout in
+   WorldPage.vue clamps its size to at most 200px, flush against the same
+   12px margin) instead of sitting at that same top offset — the two sat
+   exactly on top of each other otherwise, the button invisible underneath
+   (direct feedback: "no inventory button on phone" — it was there, just
+   covered). Errs toward extra clearance on a smaller screen (where the
+   real minimap is smaller than the 200px this assumes) over ever
+   overlapping again on a larger one. */
 .touch-inventory-btn {
   pointer-events: auto;
   position: absolute;
-  top: calc(12px + env(safe-area-inset-top, 0px));
+  top: calc(12px + 200px + 10px + env(safe-area-inset-top, 0px));
   right: calc(12px + env(safe-area-inset-right, 0px));
   width: 34px;
   height: 34px;

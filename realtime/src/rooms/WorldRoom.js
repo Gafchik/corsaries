@@ -229,6 +229,16 @@ function pointAhead(x, y, heading, distance) {
   return { x: x + Math.sin(heading) * distance, y: y - Math.cos(heading) * distance }
 }
 
+/** Distance from (px,py) to the nearest point on the segment (x1,y1)-(x2,y2) — see findCannonballHit's own comment for why a moving ball needs this instead of just its endpoint. */
+function distanceToSegment(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1
+  const dy = y2 - y1
+  const lenSq = dx * dx + dy * dy
+  if (lenSq === 0) return Math.hypot(px - x1, py - y1)
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq))
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+}
+
 // Linear-interpolates the island's wobbly shore boundary (its `points`
 // samples, evenly spaced around the circle — see genShore in worldgen.js) at
 // an arbitrary angle, instead of only knowing the boundary at the 16 sampled
@@ -1142,6 +1152,8 @@ export class WorldRoom extends Room {
 
     for (const ball of this.cannonballs) {
       const step = ball.speed * (deltaMs / 1000)
+      const prevX = ball.x
+      const prevY = ball.y
       ball.x += ball.dx * step
       ball.y += ball.dy * step
       ball.traveled += step
@@ -1151,7 +1163,7 @@ export class WorldRoom extends Room {
         continue // absorbed by the shore — no damage, ball removed
       }
 
-      const hitTarget = this.findCannonballHit(ball)
+      const hitTarget = this.findCannonballHit(ball, prevX, prevY)
       if (hitTarget) {
         this.resolveHit(ball.attackerId, hitTarget[0], hitTarget[1], ball.damage)
         continue
@@ -1163,7 +1175,19 @@ export class WorldRoom extends Room {
     this.cannonballs = remaining
   }
 
-  findCannonballHit(ball) {
+  /**
+   * Checks the WHOLE step the ball just moved (prevX,prevY -> ball.x,y),
+   * not just where it ended up — a single tick's step can be large enough
+   * (a fast hull's cannonball speed × a ~16ms tick lands well past
+   * CANNONBALL_HIT_RADIUS) to jump clean over a target that sat squarely in
+   * its path, especially point-blank where the whole engagement might only
+   * ever get one or two ticks of overlap at all (direct feedback: shots
+   * that should obviously land — right up against the target, or a
+   * well-aimed shot at range — sometimes just phasing through). Distance
+   * from the target to the nearest point on that segment, not the ball's
+   * final position alone, is what actually decides a hit now.
+   */
+  findCannonballHit(ball, prevX, prevY) {
     for (const [targetId, target] of this.state.players) {
       if (targetId === ball.attackerId) continue
       // handleFire already blocks firing FROM inside the zone — this is the
@@ -1172,7 +1196,7 @@ export class WorldRoom extends Room {
       // just keeps flying past them, same as it does past an island it
       // missed — not "blocked" with its own message, just a non-target.
       if (this.isNearAnyPort(target.x, target.y)) continue
-      if (Math.hypot(target.x - ball.x, target.y - ball.y) <= CANNONBALL_HIT_RADIUS) return [targetId, target]
+      if (distanceToSegment(target.x, target.y, prevX, prevY, ball.x, ball.y) <= CANNONBALL_HIT_RADIUS) return [targetId, target]
     }
     return null
   }

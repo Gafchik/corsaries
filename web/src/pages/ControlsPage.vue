@@ -18,6 +18,13 @@
     </div>
 
     <div v-if="tab === 'keyboard'" class="section">
+      <!-- Free aim (see fireFree/updateAiming in WorldPage.vue) is mouse-only
+           on keyboard — hold, aim toward the cursor, release to fire — the
+           same way a mouse button always has been, never through this
+           rebind system. Without this note, fire quietly not being in the
+           list below (it used to have its own Q/E row) reads as something
+           missing rather than something that moved on purpose. -->
+      <div class="row__label row__label--note">Прицел и выстрел — мышью (навёл, отпустил), не привязывается</div>
       <div class="row" v-for="a in KEYBOARD_ACTIONS" :key="'kb-' + a">
         <div class="row__label">{{ ACTION_LABELS[a] }}</div>
         <button
@@ -35,7 +42,7 @@
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="10" rx="5"/><line x1="7" y1="12" x2="7" y2="12"/><line x1="17" y1="11" x2="17" y2="11"/></svg>
         {{ gamepadConnected ? 'Геймпад подключён' : 'Геймпад не обнаружен' }}
       </div>
-      <div class="row__label row__label--note">Движение всегда на левом стике — тут только кнопки</div>
+      <div class="row__label row__label--note">Движение — левый стик, прицел — правый стик — тут только кнопки</div>
       <div class="row" v-for="a in GAMEPAD_ACTIONS" :key="'gp-' + a">
         <div class="row__label">{{ ACTION_LABELS[a] }}</div>
         <button
