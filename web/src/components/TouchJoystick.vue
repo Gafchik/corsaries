@@ -2,6 +2,7 @@
   <div
     ref="base"
     class="joystick-base"
+    :class="{ 'joystick-base--aim': variant === 'aim' }"
     @pointerdown="start"
     @pointermove="move"
     @pointerup="end"
@@ -15,12 +16,24 @@
 import { ref, computed, onBeforeUnmount } from 'vue'
 import { controls } from '@/services/controls'
 
+// 'move' drives WASD-equivalent movement (controls.setTouchVector — see
+// getMoveVector); 'aim' drives the free-aim direction preview (
+// controls.setAimVector — see getAimVector/updateAiming in WorldPage.vue).
+// Same drag-a-knob-in-a-circle widget either way, just wired to a different
+// vector so the two on-screen sticks don't fight over the same input.
+const props = defineProps({ variant: { type: String, default: 'move' } })
+
 const RADIUS = 42 // px the knob can travel from center before clamping
 
 const base = ref(null)
 const knobX = ref(0)
 const knobY = ref(0)
 let pointerId = null
+
+function setVector(x, y) {
+  if (props.variant === 'aim') controls.setAimVector(x, y)
+  else controls.setTouchVector(x, y)
+}
 
 function update(e) {
   const rect = base.value.getBoundingClientRect()
@@ -33,7 +46,7 @@ function update(e) {
   }
   knobX.value = dx
   knobY.value = dy
-  controls.setTouchVector(dx / RADIUS, dy / RADIUS)
+  setVector(dx / RADIUS, dy / RADIUS)
 }
 
 function start(e) {
@@ -59,13 +72,14 @@ function end(e) {
   pointerId = null
   knobX.value = 0
   knobY.value = 0
-  controls.setTouchVector(0, 0)
+  setVector(0, 0)
 }
 
 // If WorldPage unmounts (navigating to a port, say) mid-drag, no pointerup
 // ever reaches this component — without this the ship would keep sailing
-// in whatever direction the thumb was last at when the page changed.
-onBeforeUnmount(() => controls.setTouchVector(0, 0))
+// (or the aim cone would stay stuck showing) in whatever direction the
+// thumb was last at when the page changed.
+onBeforeUnmount(() => setVector(0, 0))
 
 const knobStyle = computed(() => ({ transform: `translate(${knobX.value}px, ${knobY.value}px)` }))
 </script>
@@ -79,6 +93,15 @@ const knobStyle = computed(() => ({ transform: `translate(${knobX.value}px, ${kn
   background: rgba(255, 255, 255, 0.07);
   border: 2px solid rgba(255, 255, 255, 0.25);
   touch-action: none;
+}
+/* Gold tint on the aim stick — a weapon control, not movement, worth
+   reading apart from the plain movement stick at a glance. */
+.joystick-base--aim {
+  border-color: rgba(217, 164, 65, 0.55);
+}
+.joystick-base--aim .joystick-knob {
+  background: rgba(240, 201, 107, 0.4);
+  border-color: rgba(240, 201, 107, 0.75);
 }
 .joystick-knob {
   position: absolute;

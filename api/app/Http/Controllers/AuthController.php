@@ -258,14 +258,16 @@ class AuthController extends Controller
 
         // Mirrors DEFAULT_KEYBOARD/DEFAULT_GAMEPAD in
         // web/src/services/controls.js — keep in sync by hand if those ever
-        // change.
+        // change. Fire has no keyboard entry — a mouse click drives free aim
+        // directly, never through the rebind system (see that file's own
+        // comment on GAMEPAD_ONLY_ACTIONS) — only the gamepad side gets one.
         $user->update(['control_bindings' => [
             'keyboard' => [
                 'moveUp' => 'KeyW', 'moveDown' => 'KeyS', 'moveLeft' => 'KeyA', 'moveRight' => 'KeyD',
-                'fireLeft' => 'KeyQ', 'fireRight' => 'KeyE', 'action' => 'KeyF', 'inventory' => 'KeyI', 'back' => 'Escape',
+                'action' => 'KeyF', 'inventory' => 'KeyI', 'back' => 'Escape',
             ],
             'gamepad' => [
-                'fireLeft' => 4, 'fireRight' => 5, 'action' => 0, 'inventory' => 3, 'back' => 1,
+                'fire' => 7, 'action' => 0, 'inventory' => 3, 'back' => 1,
             ],
         ]]);
     }

@@ -46,54 +46,50 @@
         <span class="context-prompt__hint">Действие</span>
       </div>
 
-      <!-- Always visible (keyboard/gamepad players want to see this too, not
-           just touch) — two reload rings for the broadsides. Doubles as the
-           touch fire buttons on a phone: hold to preview the hit-zone cone,
-           release to fire (see fireLeft/fireRight hold-polling in
-           WorldScene.update). Stays a clickable mouse target everywhere else
-           as a bonus, not a requirement. Hidden while PortModal is open —
-           firing/aiming input is locked then anyway (see the activePortId
-           watch below), so a live ring here would just be a lie. -->
-      <div v-if="!activePortId" class="broadside-hud" :class="{ 'broadside-hud--phone': showTouchControls }">
-        <button
-          class="broadside-ring broadside-ring--left"
-          :style="broadsideRingStyle(leftReloadFraction)"
-          @pointerdown.prevent="controls.touchHoldStart('fireLeft')"
-          @pointerup.prevent="controls.touchHoldEnd('fireLeft')"
-          @pointercancel.prevent="controls.touchHoldEnd('fireLeft')"
-          @pointerleave.prevent="controls.touchHoldEnd('fireLeft')"
-        >
+      <!-- Reload readout — always visible for keyboard/gamepad players (a
+           phone shows the same progress folded into the Действие button's
+           own background instead, see .touch-btn below, rather than showing
+           it twice). A plain non-interactive gauge now that free aim's
+           actual fire input lives elsewhere entirely (a mouse hold/release
+           anywhere over the canvas, a gamepad's dedicated 'fire' button, or
+           the touch aim stick + Действие) — clicking a fixed HUD element
+           made sense when it doubled as the fire button, it doesn't anymore
+           now that firing means aiming at the world, not at a screen
+           corner. Hidden while PortModal is open — firing is locked then
+           anyway (see the activePortId watch below), so a live ring here
+           would just be a lie. -->
+      <div v-if="!activePortId && !showTouchControls" class="broadside-hud">
+        <div class="broadside-ring" :style="broadsideRingStyle(reloadFraction)">
           <span class="broadside-ring__inner">
-            <svg viewBox="0 0 24 24" fill="none" :stroke="leftReloadFraction >= 1 ? 'var(--c-success)' : 'rgba(238,245,242,0.45)'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" :stroke="reloadFraction >= 1 ? 'var(--c-success)' : 'rgba(238,245,242,0.45)'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/></svg>
           </span>
-        </button>
-        <button
-          class="broadside-ring broadside-ring--right"
-          :style="broadsideRingStyle(rightReloadFraction)"
-          @pointerdown.prevent="controls.touchHoldStart('fireRight')"
-          @pointerup.prevent="controls.touchHoldEnd('fireRight')"
-          @pointercancel.prevent="controls.touchHoldEnd('fireRight')"
-          @pointerleave.prevent="controls.touchHoldEnd('fireRight')"
-        >
-          <span class="broadside-ring__inner">
-            <svg viewBox="0 0 24 24" fill="none" :stroke="rightReloadFraction >= 1 ? 'var(--c-success)' : 'rgba(238,245,242,0.45)'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/></svg>
-          </span>
-        </button>
+        </div>
       </div>
 
       <!-- Touch-only: a phone with no gamepad paired (see showTouchControls)
-           gets an on-screen stick + action button instead of relying on
-           WASD/gamepad. Sits above the canvas, so a tap here never also
-           reaches the canvas's own pointerdown-fires-cannon handler below.
-           Действие now sits bottom-right (правый борт moved up to make
-           room — see .broadside-hud--phone), not floating above the
-           broadside rings — direct sketch/request. -->
+           gets on-screen sticks + buttons instead of relying on
+           WASD/mouse/gamepad. Sits above the canvas, so a tap here never
+           also reaches the canvas's own pointerdown-aims handler below.
+           Left stick moves, right stick aims (continuously previews the hit
+           cone while pushed — see updateAiming), Действие doubles as the
+           fire trigger while the aim stick is active (see
+           handleTouchActionOrFire) and its own reload progress otherwise —
+           direct sketch/request. Инвент sits alone in the opposite top
+           corner from the exit button, the only on-screen way to open the
+           inventory on a phone (keyboard I / gamepad Y have no touch
+           equivalent otherwise). -->
       <div v-if="showTouchControls && !activePortId" class="touch-controls">
         <TouchJoystick class="touch-controls__stick" />
-        <button class="touch-btn" @pointerdown.prevent="controls.touchPress('action')">Действие</button>
+        <TouchJoystick class="touch-controls__aim-stick" variant="aim" />
+        <button class="touch-btn" :style="broadsideRingStyle(reloadFraction)" @pointerdown.prevent="handleTouchActionOrFire">Действие</button>
+        <button class="touch-inventory-btn" @pointerdown.prevent="controls.touchPress('inventory')" aria-label="Инвентарь">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5V8z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>
+        </button>
       </div>
 
       <ShipInfoOverlay v-if="showInfo" :ship-info="shipInfo" :coins="coins" @close="showInfo = false" />
+
+      <DeathPenaltyModal :summary="deathSummary" @close="deathSummary = null" />
 
       <!--
         Opened straight over the world instead of navigating to a 'port/:id'
@@ -129,6 +125,7 @@ import { controls, isPhone, onGamepadChange } from '@/services/controls'
 import ShipInfoOverlay from '@/components/ShipInfoOverlay.vue'
 import TouchJoystick from '@/components/TouchJoystick.vue'
 import PortModal from '@/components/PortModal.vue'
+import DeathPenaltyModal from '@/components/DeathPenaltyModal.vue'
 
 const router = useRouter()
 const container = ref(null)
@@ -142,34 +139,35 @@ const showInfo = ref(false)
 const activePortId = ref(null)
 const shipInfo = ref(null)
 const coins = ref(0)
+// { lostGold, lostProducts, lostSailors } while the death-penalty popup is
+// open, null otherwise — set by the 'death_penalty' handler in
+// setupNetworking (see notifyDeathPenalty), cleared by the modal's own
+// 'close'. A toast doesn't give a real setback this weight; this is
+// something the player has to actually acknowledge (see DeathPenaltyModal).
+const deathSummary = ref(null)
 
-// Broadside готовность/перезарядка — 0 = только что выстрелил, 1 = готов.
-// Optimistic/predicted from the moment 'fire' is sent (see fireBroadside in
-// WorldScene below), not confirmed by the server — the server enforces the
-// real cooldown independently and just silently ignores an early shot, so
-// worst case this ring is briefly wrong instead of the fire being blocked.
-const leftFiredAt = ref(0)
-const rightFiredAt = ref(0)
+// Reload readiness — 0 = только что выстрелил, 1 = готов. One shared ring
+// now that the whole gun deck fires together (see broadsideCannons in
+// WorldRoom.js) instead of two independent broadsides. Optimistic/predicted
+// from the moment 'fire' is sent (see fireFree in WorldScene below), not
+// confirmed by the server — the server enforces the real cooldown
+// independently and just silently ignores an early shot, so worst case
+// this ring is briefly wrong instead of the fire being blocked.
+const firedAt = ref(0)
 const cooldownTick = ref(0)
 let cooldownRaf = null
 function pumpCooldownTick() {
   cooldownTick.value = Date.now()
-  const stillCooling = Date.now() - leftFiredAt.value < FIRE_COOLDOWN_MS || Date.now() - rightFiredAt.value < FIRE_COOLDOWN_MS
+  const stillCooling = Date.now() - firedAt.value < FIRE_COOLDOWN_MS
   cooldownRaf = stillCooling ? requestAnimationFrame(pumpCooldownTick) : null
 }
-function noteBroadsideFired(uiSide) {
-  const now = Date.now()
-  if (uiSide === 'fireLeft') leftFiredAt.value = now
-  else rightFiredAt.value = now
+function noteBroadsideFired() {
+  firedAt.value = Date.now()
   if (!cooldownRaf) cooldownRaf = requestAnimationFrame(pumpCooldownTick)
 }
-const leftReloadFraction = computed(() => {
+const reloadFraction = computed(() => {
   void cooldownTick.value
-  return Math.min(1, (Date.now() - leftFiredAt.value) / FIRE_COOLDOWN_MS)
-})
-const rightReloadFraction = computed(() => {
-  void cooldownTick.value
-  return Math.min(1, (Date.now() - rightFiredAt.value) / FIRE_COOLDOWN_MS)
+  return Math.min(1, (Date.now() - firedAt.value) / FIRE_COOLDOWN_MS)
 })
 function broadsideRingStyle(fraction) {
   const deg = Math.round(fraction * 360)
@@ -231,21 +229,29 @@ const FIRE_COOLDOWN_MS = 900
 const DEFAULT_AIM_RANGE = 78
 
 // Keep in sync with SHIP_CANNON_COUNT in realtime/src/rooms/WorldRoom.js —
-// how many individual cannons fan out per broadside (half of each entry
-// here). Only used to size the aim-hold preview (see drawAimCone) before
-// this player's first real shot has confirmed anything with the server;
-// it's never trusted for actual hit resolution.
+// how many individual cannons fan out in one volley (the whole deck now,
+// see broadsideCannons server-side). Only used to size the aim preview (see
+// drawAimCone) before this player's first real shot has confirmed anything
+// with the server; it's never trusted for actual hit resolution.
 const SHIP_CANNON_COUNT = {
   boat: 6, schooner: 10, caravel: 14, brig: 16,
   frigate: 20, galleon: 24, corvette: 18, battleship: 30,
 }
 
 // Keep in sync with CANNON_SPREAD_HALF_ANGLE in
-// realtime/src/rooms/WorldRoom.js — how far each individual gun in a
-// broadside fans out from dead-center, in radians. Purely cosmetic here
-// (see drawAimCone/spawnBroadsideVolley); the server resolves every ball's
-// real flight path independently and never reads this copy.
-const CANNON_SPREAD_HALF_ANGLE = 0.16
+// realtime/src/rooms/WorldRoom.js — how far each individual gun in the
+// volley fans out from dead-center, in radians. Purely cosmetic here (see
+// drawAimCone/spawnBroadsideVolley); the server resolves every ball's real
+// flight path independently and never reads this copy.
+const CANNON_SPREAD_HALF_ANGLE = 0.32
+
+// Deadzone for the free-aim sources that report a continuous vector
+// (gamepad right stick, the on-screen aim stick) — below this magnitude
+// the source counts as "not aiming" rather than jittering toward whatever
+// tiny drift its resting position happens to read. Kept local to aiming
+// (movement's own deadzone lives in controls.js's STICK_DEADZONE) since the
+// two inputs have different tolerances for a false-positive.
+const STICK_AIM_DEADZONE = 0.2
 
 // Keep in sync with CARGO_DROP_TTL_MS in realtime/src/rooms/WorldRoom.js —
 // purely cosmetic here (the server deletes the drop from state on its own
@@ -272,8 +278,9 @@ const SHIP_TYPE_NAMES = {
   frigate: 'Фрегат', galleon: 'Галеон', corvette: 'Корвет', battleship: 'Линкор',
 }
 const NAME_TEXT_STYLE = { fontSize: '12px', color: '#ffffff', stroke: '#0a1f28', strokeThickness: 3 }
-// Keep in sync with config/products.php's 'name' field — used only for the
-// Notify toast text on a cargo pickup (see onCargoClaimed).
+// Keep in sync with config/products.php's 'name' field — used for the
+// Notify toast text on a cargo pickup (see onCargoClaimed) and the death
+// penalty popup's loss breakdown (see the 'death_penalty' handler).
 const PRODUCT_NAMES = {
   rum: 'Ром', silk: 'Шёлк', water: 'Вода', food: 'Еда',
   leather: 'Кожа', wood: 'Дерево', tobacco: 'Табак', coffee: 'Кофе',
@@ -381,6 +388,7 @@ class WorldScene extends Phaser.Scene {
     this.onNearHumanChange = data.onNearHumanChange
     this.onCargoClaimed = data.onCargoClaimed
     this.onActionRejected = data.onActionRejected
+    this.onDeathPenalty = data.onDeathPenalty
     this.onAbordageStarted = data.onAbordageStarted
     this.onActionPress = data.onActionPress
     this.onFireBroadside = data.onFireBroadside
@@ -761,59 +769,59 @@ class WorldScene extends Phaser.Scene {
     this.lastMoveSentAt = 0
     this.otherShips = new Map()
     this.cargoDropSprites = new Map() // dropId -> { crate, ring, x, y, spawnedAt }
-    this.activeCannonballs = new Map() // `${attackerId}:${side}` -> array of in-flight ball sprites (a whole volley, see spawnBroadsideVolley)
-    // Guards fireBroadside below — mashing fire mid-reload used to still
-    // reset the HUD ring's animation (via onFireBroadside) even though no
-    // ball actually flew, since the server silently drops the early 'fire'
-    // but the client had no idea it was early and reset anyway.
-    this.lastBroadsideFiredAt = { fireLeft: 0, fireRight: 0 }
+    this.activeCannonballs = new Map() // attackerId -> array of in-flight ball sprites (a whole volley, see spawnBroadsideVolley)
+    // Guards fireFree below — mashing fire mid-reload used to still reset
+    // the HUD ring's animation (via onFireBroadside) even though no ball
+    // actually flew, since the server silently drops the early 'fire' but
+    // the client had no idea it was early and reset anyway.
+    this.lastBroadsideFiredAt = 0
 
-    // Hold-to-aim: press/hold a broadside input to preview its hit-zone
-    // cone, release to actually fire (see the per-frame polling in update()
-    // and the aim cones set up just below). lastKnownRange starts at the
-    // boat default and gets corrected the instant this player's own first
-    // 'fired' broadcast arrives (see setupNetworking) — close enough for
-    // the very first hold before that, and exact for every one after.
-    this.wasHeld = { fireLeft: false, fireRight: false }
-    this.lastKnownRange = { fireLeft: DEFAULT_AIM_RANGE, fireRight: DEFAULT_AIM_RANGE }
+    // Free aim: mouse/gamepad-stick/touch-stick continuously feed an aim
+    // angle (see updateAiming), previewed as a hit-zone cone, fired on
+    // whichever trigger fits the device (mouse release, a discrete gamepad
+    // button, or the touch Действие button while the aim stick is pushed —
+    // see the 'fire' onPress handler and the touch-controls template).
+    // lastKnownRange starts at the boat default and gets corrected the
+    // instant this player's own first 'fired' broadcast arrives (see
+    // setupNetworking) — close enough for the very first aim before that,
+    // and exact for every one after.
+    this.wasMouseAimHeld = false
+    this.currentAimAngle = 0
+    this.lastKnownRange = DEFAULT_AIM_RANGE
     // Set by setInputLocked (see WorldPage.vue's activePortId watch) while
     // PortModal is open — freezes movement/aiming/firing without tearing
     // down the scene or leaving the room, just like standing still.
     this.inputLocked = false
-    // Translucent hit-zone cones, one per broadside, drawn/cleared each
-    // frame in update() while that side is held. Minimap must never show
-    // these — same reasoning as every other screen-only HUD graphic.
-    this.aimCones = { fireLeft: this.add.graphics().setDepth(8), fireRight: this.add.graphics().setDepth(8) }
-    this.minimapCam?.ignore([this.aimCones.fireLeft, this.aimCones.fireRight])
+    // Translucent hit-zone cone, drawn/cleared each frame in update() while
+    // actively aiming. Minimap must never show it — same reasoning as every
+    // other screen-only HUD graphic.
+    this.aimCone = this.add.graphics().setDepth(8)
+    this.minimapCam?.ignore(this.aimCone)
 
     this.setupNetworking()
 
-    // Mouse buttons used to fire immediately on press; now they're just
-    // another held-input source polled each frame in update(), same as
-    // keyboard/gamepad/touch (see the fireLeft/fireRight hold-detection
-    // there) — pointerdown/up only need to be tracked, not acted on here.
-    // 'left'/'right' server-side are the internal labels for the two
-    // broadside vectors — when the bow faces up-screen, the vector labeled
-    // 'right' actually points screen-left (verified against the working
-    // hit-detection math, not guessed), so the screen-left broadside
-    // (mouse left button) sends 'right' and the screen-right one (mouse
-    // right button) sends 'left'. See broadsideDirection() for the same
-    // mapping applied to the cone's drawn direction.
+    // Left mouse button drives free aim directly (hold to preview, release
+    // to fire — see updateAiming), read straight off Phaser's pointer state
+    // rather than through the rebind system, same as it always was for
+    // mouse buttons. Right-click stays disabled — no second use for it now.
     this.input.mouse?.disableContextMenu()
 
-    // Rebindable keyboard/gamepad actions (see services/controls.js) —
-    // fireLeft/fireRight are now polled by held-state in update() instead
-    // of onPress (see gamepadButtonHeld/controls.isDown there); action/
-    // inventory/back stay discrete press events, unchanged.
-    // Guarded by inputLocked too, not just the per-frame movement/firing —
-    // PortModal has its OWN 'back'/'inventory' listeners (see
-    // PortModal.vue) that are meant to close/open ITS overlay while it's
-    // open; without this guard, the exact same button press would ALSO hit
-    // these still-live World listeners underneath (onBackPress leaves the
-    // world entirely — very much not what closing a shop dialog should do).
+    // Rebindable keyboard/gamepad actions (see services/controls.js) — a
+    // gamepad's 'fire' is a discrete press (unlike mouse's hold/release),
+    // firing toward wherever its right stick currently points (or the
+    // ship's own forward direction if the stick's centered — see
+    // fireFreeAimButton). action/inventory/back stay discrete press events,
+    // unchanged. Guarded by inputLocked too, not just the per-frame
+    // movement/firing — PortModal has its OWN 'back'/'inventory' listeners
+    // (see PortModal.vue) that are meant to close/open ITS overlay while
+    // it's open; without this guard, the exact same button press would ALSO
+    // hit these still-live World listeners underneath (onBackPress leaves
+    // the world entirely — very much not what closing a shop dialog should
+    // do).
     this.controlUnsubs = [
       controls.onPress('action', () => { if (!this.inputLocked) this.onActionPress?.() }),
       controls.onPress('inventory', () => { if (!this.inputLocked) this.onInventoryPress?.() }),
+      controls.onPress('fire', () => { if (!this.inputLocked) this.fireFreeAimButton() }),
       // Circle/B on a gamepad, Escape on keyboard — same universal "back"
       // convention as every other screen (Port, Abordage, Loot, Controls),
       // just meaning "leave the world" here instead of "close this dialog".
@@ -942,28 +950,23 @@ class WorldScene extends Phaser.Scene {
       this.cargoDropSprites.delete(id)
     })
 
-    this.room.onMessage('fired', ({ attackerId, side, count, range, speed }) => {
-      this.spawnBroadsideVolley(attackerId, side, count, range, speed)
+    this.room.onMessage('fired', ({ attackerId, angle, count, range, speed }) => {
+      this.spawnBroadsideVolley(attackerId, angle, count, range, speed)
       // Corrects the aim cone's length to this player's real, possibly
       // upgraded, cannon range the moment it's actually known — see
-      // lastKnownRange's setup in create(). Same server-side->UI-side
-      // inversion as everywhere else ('right' broadcasts are the fireLeft
-      // broadside, 'left' broadcasts are fireRight).
-      if (attackerId === this.room.sessionId) {
-        this.lastKnownRange[side === 'right' ? 'fireLeft' : 'fireRight'] = range
-      }
+      // lastKnownRange's setup in create().
+      if (attackerId === this.room.sessionId) this.lastKnownRange = range
     })
 
-    // Pushed on join and after anything that could change either side's
-    // real range (cannon upgrades, a new hull — see sendBroadsideStats in
-    // WorldRoom.js) — without this, a side that hadn't fired yet THIS
-    // session stayed on the small DEFAULT_AIM_RANGE fallback even on a
-    // ship with a much bigger real range, until it fired once itself. Same
-    // fix, just proactive instead of only reactive to this player's own
-    // 'fired' broadcasts above.
-    this.room.onMessage('broadside_stats', ({ fireLeft, fireRight }) => {
-      if (fireLeft?.range) this.lastKnownRange.fireLeft = fireLeft.range
-      if (fireRight?.range) this.lastKnownRange.fireRight = fireRight.range
+    // Pushed on join and after anything that could change the deck's real
+    // range (cannon upgrades, a new hull — see sendBroadsideStats in
+    // WorldRoom.js) — without this, a freshly (re)joined client stayed on
+    // the small DEFAULT_AIM_RANGE fallback even on a ship with a much
+    // bigger real range, until it fired once itself. Same fix, just
+    // proactive instead of only reactive to this player's own 'fired'
+    // broadcasts above.
+    this.room.onMessage('broadside_stats', ({ range }) => {
+      if (range) this.lastKnownRange = range
     })
     // Asked for right here, the instant this listener is actually live —
     // a server-side push from onJoin used to do this instead, but it had
@@ -1022,6 +1025,14 @@ class WorldScene extends Phaser.Scene {
       this.onActionRejected?.('Потоплен — респавн у ближайшего порта')
     })
 
+    // Arrives separately from 'sunk' above (its own async DB round-trip on
+    // WorldRoom's side — see applyDeathPenalty's comment) and only ever
+    // targeted at this exact client, never broadcast, so there's no
+    // targetId to check here the way 'sunk' needs one.
+    this.room.onMessage('death_penalty', ({ lostGold, lostProducts, lostSailors }) => {
+      this.onDeathPenalty?.(lostGold, lostProducts, lostSailors)
+    })
+
     // Naval-kill loot is a floating CargoDrop now (see spawnCargoDrop in
     // WorldRoom.js), not an instant private reward — this only fires once
     // this specific client actually reached and claimed one (server-side,
@@ -1063,29 +1074,26 @@ class WorldScene extends Phaser.Scene {
    * visibly fly past what stopped it — the other balls in this same volley
    * are unaffected and keep flying toward their own individual range/miss.
    *
-   * One shot is now `count` separate balls (one per real cannon on that
-   * side, see broadsideCannons in WorldRoom.js), fanned evenly across
-   * CANNON_SPREAD_HALF_ANGLE exactly like the server just did — this only
-   * needs the aggregate range/speed the server sends, not each individual
-   * cannon's exact numbers, since the actual hit/miss and damage are
-   * already fully decided server-side by the time this plays.
+   * One shot is now `count` separate balls (one per real cannon on the
+   * deck, see broadsideCannons in WorldRoom.js), fanned evenly across
+   * CANNON_SPREAD_HALF_ANGLE around the free-aimed angle exactly like the
+   * server just did — this only needs the aggregate range/speed the server
+   * sends, not each individual cannon's exact numbers, since the actual
+   * hit/miss and damage are already fully decided server-side by the time
+   * this plays.
    */
-  spawnBroadsideVolley(attackerId, side, count, range, speed) {
+  spawnBroadsideVolley(attackerId, angle, count, range, speed) {
     const attacker = this.room.state.players.get(attackerId)
     if (!attacker) return
 
-    const fx = Math.sin(attacker.rotation)
-    const fy = -Math.cos(attacker.rotation)
-    const dir = side === 'right' ? { x: fy, y: -fx } : { x: -fy, y: fx }
-    const baseAngle = Math.atan2(dir.y, dir.x)
+    const baseAngle = angle
 
-    const key = `${attackerId}:${side}`
     // A fresh volley firing before the previous one's balls have all
     // resolved (fast reload) doesn't cut those short — they're still
-    // legitimately in flight — just stop tracking them under this key so
-    // this volley's own list isn't polluted with stale entries.
-    this.activeCannonballs.set(key, [])
-    const list = this.activeCannonballs.get(key)
+    // legitimately in flight — just stop tracking them under this attacker
+    // so this volley's own list isn't polluted with stale entries.
+    this.activeCannonballs.set(attackerId, [])
+    const list = this.activeCannonballs.get(attackerId)
 
     for (let i = 0; i < count; i++) {
       const t = count === 1 ? 0 : i / (count - 1) - 0.5 // -0.5..0.5
@@ -1109,27 +1117,23 @@ class WorldScene extends Phaser.Scene {
     }
   }
 
-  /** Stops whichever in-flight ball (across both of this attacker's sides) is currently closest to (x, y) — the one 'hit'/'cannonball_blocked' just said resolved there. Leaves every other ball in the volley flying. */
+  /** Stops whichever of this attacker's in-flight balls is currently closest to (x, y) — the one 'hit'/'cannonball_blocked' just said resolved there. Leaves every other ball in the volley flying. */
   stopNearestCannonball(attackerId, x, y) {
+    const list = this.activeCannonballs.get(attackerId)
+    if (!list) return
     let closest = null
-    let closestList = null
     let closestDist = Infinity
-    for (const side of ['left', 'right']) {
-      const list = this.activeCannonballs.get(`${attackerId}:${side}`)
-      if (!list) continue
-      for (const ball of list) {
-        const dist = Math.hypot(ball.x - x, ball.y - y)
-        if (dist < closestDist) {
-          closestDist = dist
-          closest = ball
-          closestList = list
-        }
+    for (const ball of list) {
+      const dist = Math.hypot(ball.x - x, ball.y - y)
+      if (dist < closestDist) {
+        closestDist = dist
+        closest = ball
       }
     }
     if (!closest) return
     this.tweens.killTweensOf(closest)
     closest.destroy()
-    closestList.splice(closestList.indexOf(closest), 1)
+    list.splice(list.indexOf(closest), 1)
   }
 
   /**
@@ -1437,135 +1441,122 @@ class WorldScene extends Phaser.Scene {
     }
   }
 
-  // 'left'/'right' here are screen-relative UI labels ('fireLeft'/'fireRight',
-  // matching the touch buttons and the rebindable action names) — the
-  // server's internal 'side' vector is inverted from that (see the note on
-  // the mouse pointerdown handler above), translated right here so nothing
-  // downstream needs to know about that inversion.
-  //
   // Guarded by our own predicted cooldown (lastBroadsideFiredAt, set up in
   // create()) before sending anything — without this, mashing fire mid-reload
   // still sent 'fire' (which the server just silently drops) AND still called
   // onFireBroadside, which reset the HUD ring's animation to "just fired"
   // even though nothing actually did. The ring restarting with no shot to
   // show for it was the desync.
-  fireBroadside(uiSide) {
+  fireFree(angle) {
     const now = Date.now()
-    if (now - this.lastBroadsideFiredAt[uiSide] < FIRE_COOLDOWN_MS) return
-    this.lastBroadsideFiredAt[uiSide] = now
-    this.room.send('fire', { side: uiSide === 'fireLeft' ? 'right' : 'left' })
-    this.onFireBroadside?.(uiSide)
-  }
-
-  /** Is a gamepad currently holding down whatever button this action is bound to — same bindings.gamepad lookup controls.js's own press-edge polling uses, just read as a live state instead of an edge. */
-  gamepadButtonHeld(action) {
-    const pad = controls.firstGamepad()
-    if (!pad) return false
-    const btnIndex = controls.bindings.gamepad[action]
-    return !!pad.buttons[btnIndex]?.pressed
+    if (now - this.lastBroadsideFiredAt < FIRE_COOLDOWN_MS) return
+    this.lastBroadsideFiredAt = now
+    this.room.send('fire', { angle })
+    this.onFireBroadside?.()
   }
 
   /**
-   * Screen-space unit vector the cone/cannonball for this broadside points
-   * along — identical math to spawnCannonball's dir (kept in sync
-   * deliberately, not shared, since spawnCannonball works off a server
-   * 'side' label while this works off the UI-facing action name).
+   * Gamepad 'fire' button / touch Действие-as-fire (see the 'fire' onPress
+   * handler and the touch-controls template) — a discrete press, not a
+   * hold/release like the mouse, so it fires toward whatever the aim stick
+   * currently points at, or straight ahead if it's centered (pressing fire
+   * without bothering to aim should still do something reasonable, not
+   * nothing). Blocked in port territory same as the mouse path.
    */
-  broadsideDirection(uiSide) {
-    const fx = Math.sin(this.ship.rotation)
-    const fy = -Math.cos(this.ship.rotation)
-    // uiSide 'fireLeft' sends server side 'right' (see fireBroadside) — same
-    // inversion applied here so the cone points the same way the ball flies.
-    return uiSide === 'fireLeft' ? { x: fy, y: -fx } : { x: -fy, y: fx }
+  fireFreeAimButton() {
+    if (this.currentNearPortId !== null) {
+      this.onActionRejected?.('Нельзя стрелять на территории порта')
+      return
+    }
+    const stick = controls.getAimVector()
+    const angle = Math.hypot(stick.x, stick.y) > STICK_AIM_DEADZONE
+      ? Math.atan2(stick.y, stick.x)
+      : this.ship.rotation - Math.PI / 2 // ship's own forward direction — see the rotation convention note server-side (approachStep)
+    this.fireFree(angle)
   }
 
   /**
-   * Hold-to-aim polling, run every frame from update(). A broadside input
-   * counts as "held" if ANY input method says so (only one is ever actually
-   * in use at a time per player, but all are always polled so switching
-   * devices mid-session just works). On the release edge the shot actually
-   * fires — reuses fireBroadside's own cooldown guard, so holding past a
-   * ready reload and releasing early doesn't bypass it.
+   * Free-aim polling, run every frame from update(). Two independent
+   * trigger shapes share one preview cone:
+   *  - Mouse: hold left button, cone follows the world cursor position,
+   *    release fires toward wherever it last pointed (fireFree above).
+   *  - Gamepad right stick / on-screen aim stick: cone follows the stick
+   *    continuously, no button needed just to preview it — firing is a
+   *    separate discrete press (see fireFreeAimButton), not tied to this at
+   *    all, since a stick recentering isn't a deliberate "let go to shoot"
+   *    gesture the way releasing a held mouse button is.
    *
    * Firing is blocked in port territory (see isNearAnyPort in WorldRoom.js)
    * — this.currentNearPortId (set by checkNearPort, run just before this
    * every frame) is this client's own copy of that same check. While
-   * docked, holding never draws a cone (there'd be nothing honest to show —
-   * the server will refuse the shot regardless of where it's aimed), and
-   * releasing shows a toast instead of actually firing, so mashing the
-   * button in port never sends a single 'fire' the server would've had to
-   * silently drop, and the reload ring never fakes a shot that didn't
-   * happen (see fireBroadside's own note on that exact desync).
+   * docked, neither source draws a cone (there'd be nothing honest to show
+   * — the server will refuse the shot regardless of where it's aimed), and
+   * a mouse release shows a toast instead of actually firing, so mashing
+   * the button in port never sends a single 'fire' the server would've had
+   * to silently drop, and the reload ring never fakes a shot that didn't
+   * happen (see fireFree's own note on that exact desync).
    */
   updateAiming() {
     const inPort = this.currentNearPortId !== null
-    for (const uiSide of ['fireLeft', 'fireRight']) {
-      // activePointer.leftButtonDown()/rightButtonDown() is a MOUSE
-      // convenience (right hand resting on the mouse, see fireBroadside's
-      // own note on that) — must never fire from a touch pointer, which
-      // Phaser otherwise reports through the exact same "left button"
-      // state. Without wasTouch here, dragging the on-screen joystick (or
-      // just resting a second finger anywhere on the canvas) registered as
-      // a held left-button and fired a broadside on release — touch
-      // already has its own dedicated signal (controls.isTouchHeld, from
-      // the broadside-ring buttons specifically), so this fallback is
-      // gated to real mice only.
-      const mouseHeld =
-        !this.input.activePointer.wasTouch &&
-        (uiSide === 'fireLeft' ? this.input.activePointer.leftButtonDown() : this.input.activePointer.rightButtonDown())
-      const held = controls.isDown(uiSide) || this.gamepadButtonHeld(uiSide) || controls.isTouchHeld(uiSide) || mouseHeld
+    // wasTouch guard: Phaser reports an active touch through the exact same
+    // "left button down" state a real mouse click does — without it,
+    // dragging the on-screen joystick (or just resting a second finger
+    // anywhere on the canvas) read as a held mouse button and fired on
+    // release. Touch has its own dedicated aim source (the stick) below.
+    const mouseHeld = !this.input.activePointer.wasTouch && this.input.activePointer.leftButtonDown()
+    const stick = controls.getAimVector()
+    const stickActive = Math.hypot(stick.x, stick.y) > STICK_AIM_DEADZONE
 
-      if (held && !inPort) {
-        this.drawAimCone(uiSide)
-      } else {
-        this.aimCones[uiSide].clear()
-      }
+    let angle = null
+    if (mouseHeld) angle = Math.atan2(this.input.activePointer.worldY - this.ship.y, this.input.activePointer.worldX - this.ship.x)
+    else if (stickActive) angle = Math.atan2(stick.y, stick.x)
 
-      if (!held && this.wasHeld[uiSide]) {
-        if (inPort) this.onActionRejected?.('Нельзя стрелять на территории порта')
-        else this.fireBroadside(uiSide)
-      }
-      this.wasHeld[uiSide] = held
+    if (angle !== null && !inPort) {
+      this.currentAimAngle = angle
+      this.drawAimCone(angle)
+    } else {
+      this.aimCone.clear()
     }
+
+    if (!mouseHeld && this.wasMouseAimHeld) {
+      if (inPort) this.onActionRejected?.('Нельзя стрелять на территории порта')
+      else this.fireFree(this.currentAimAngle)
+    }
+    this.wasMouseAimHeld = mouseHeld
   }
 
   /**
    * Called from WorldPage.vue's activePortId watch — true while PortModal
-   * is open. Resets wasHeld on lock so a fire input that was mid-press the
-   * instant the modal opened doesn't read as a "release" (and fire) the
-   * moment it's unlocked again; movement/aiming/firing themselves are
-   * skipped in update() while this is true (see the inputLocked check
+   * is open. Resets wasMouseAimHeld on lock so a mouse press that was
+   * mid-hold the instant the modal opened doesn't read as a "release" (and
+   * fire) the moment it's unlocked again; movement/aiming/firing themselves
+   * are skipped in update() while this is true (see the inputLocked check
    * there), this just handles the immediate visual cleanup.
    */
   setInputLocked(locked) {
     this.inputLocked = locked
     if (!locked) return
     this.ship.setVelocity(0, 0)
-    for (const uiSide of ['fireLeft', 'fireRight']) {
-      this.aimCones[uiSide].clear()
-      this.wasHeld[uiSide] = false
-    }
+    this.aimCone.clear()
+    this.wasMouseAimHeld = false
   }
 
   /**
-   * Redraws one broadside's aim preview for the current frame — cleared and
-   * redrawn every frame it's held since the ship (its origin and facing)
-   * keeps moving. Shows exactly what's about to fire: a thin ray per
-   * individual cannon on that side (this ship's real gun count — see
-   * SHIP_CANNON_COUNT), fanned across the same CANNON_SPREAD_HALF_ANGLE the
-   * server actually fires with, each as long as the last known real range
-   * (see lastKnownRange), plus a faint wash across the whole spread so the
-   * covered zone still reads at a glance even with a lot of thin rays.
+   * Redraws the aim preview for the current frame — cleared and redrawn
+   * every frame it's active since the ship (its origin) keeps moving.
+   * Shows exactly what's about to fire: a thin ray per real cannon on the
+   * WHOLE deck (this ship's real gun count — see SHIP_CANNON_COUNT), fanned
+   * across the same CANNON_SPREAD_HALF_ANGLE the server actually fires
+   * with, each as long as the last known real range (see lastKnownRange),
+   * plus a faint wash across the whole spread so the covered zone still
+   * reads at a glance even with a lot of thin rays.
    */
-  drawAimCone(uiSide) {
-    const dir = this.broadsideDirection(uiSide)
-    const baseAngle = Math.atan2(dir.y, dir.x)
-    const range = this.lastKnownRange[uiSide]
+  drawAimCone(baseAngle) {
+    const range = this.lastKnownRange
     const shipType = this.meRef?.shipType ?? 'boat'
-    const totalCannons = SHIP_CANNON_COUNT[shipType] ?? SHIP_CANNON_COUNT.boat
-    const count = Math.max(1, Math.floor(totalCannons / 2))
+    const count = SHIP_CANNON_COUNT[shipType] ?? SHIP_CANNON_COUNT.boat
 
-    const cone = this.aimCones[uiSide]
+    const cone = this.aimCone
     cone.clear()
 
     // Wash across the full theoretical spread — a general "this direction,
@@ -1896,6 +1887,12 @@ function notifyActionRejected(message) {
   Notify.create({ type: 'negative', message, position: 'top' })
 }
 
+// Just stashes the raw numbers — DeathPenaltyModal itself turns
+// lostProducts into labeled rows (see its own PRODUCT_NAMES).
+function notifyDeathPenalty(lostGold, lostProducts, lostSailors) {
+  deathSummary.value = { lostGold, lostProducts, lostSailors }
+}
+
 // Same destination as the gamepad/keyboard 'back' action (see onBackPress
 // in the scene data below) and what the app header's own arrow used to do
 // before MainLayout.vue stopped rendering it on this route — this button
@@ -1914,6 +1911,17 @@ function performAction() {
   if (nearPort.value) enterPort()
   else if (nearHuman.value) challengeHuman()
   else if (nearBot.value) enterAbordage()
+}
+
+// The touch Действие button doubles as the free-aim fire trigger (see
+// controls.isAimStickActive/WorldScene.fireFreeAimButton) whenever the
+// on-screen aim stick is actually pushed — there's no separate dedicated
+// fire button on a phone (see the sketch this touch-controls layout
+// follows), it's the same button, just contextual. Falls through to its
+// normal job (performAction) the rest of the time, same as it always did.
+function handleTouchActionOrFire() {
+  if (controls.isAimStickActive()) game?.scene.getScene('world')?.fireFreeAimButton()
+  else controls.touchPress('action')
 }
 
 // Same priority as performAction() above, by construction — this only
@@ -1989,6 +1997,7 @@ onMounted(async () => {
     onNearHumanChange: (human) => { nearHuman.value = human },
     onCargoClaimed: notifyCargoClaimed,
     onActionRejected: notifyActionRejected,
+    onDeathPenalty: notifyDeathPenalty,
     onAbordageStarted: (abordageId) => { router.push(`/abordage/${abordageId}`) },
     onActionPress: performAction,
     onInventoryPress: toggleInfo,
@@ -2093,48 +2102,22 @@ onBeforeUnmount(() => {
   letter-spacing: 0.03em;
 }
 
-/* Broadside готовность/перезарядка — всегда на экране (не только тач):
-   геймпад/клавиатурный игрок так же не видел раньше, готов ли борт стрелять.
-   Кольцо красит сам conic-gradient в inline style (см. broadsideRingStyle),
-   тут только форма и подложка под иконку. */
+/* Reload readout — desktop/gamepad only (a phone folds the same progress
+   into .touch-btn's own background instead, see the touch-controls block
+   below). Non-interactive now that free aim's fire input doesn't live at a
+   fixed screen position anymore — a plain gauge, not a button. Кольцо
+   красит сам conic-gradient в inline style (см. broadsideRingStyle), тут
+   только форма и подложка под иконку. */
 .broadside-hud {
   position: absolute;
   right: calc(16px + env(safe-area-inset-right, 0px));
   bottom: calc(20px + env(safe-area-inset-bottom, 0px));
-  display: flex;
-  gap: 10px;
   z-index: 15;
-}
-/* On a phone (Действие also renders here, see .touch-btn below) the two
-   rings split apart instead of sitting side by side: левый борт stays on
-   the bottom row but scoots over to make room for Действие sliding into
-   the slot правый борт used to occupy, and правый борт moves up into
-   Действие's old spot instead — direct request/sketch. The empty box
-   itself collapses (only absolutely-positioned children left), each ring
-   positioned off ITS edges instead of flex — same effective corner. */
-.broadside-hud--phone {
-  display: block;
-}
-.broadside-hud--phone .broadside-ring--left {
-  position: absolute;
-  right: 62px;
-  bottom: 0;
-}
-.broadside-hud--phone .broadside-ring--right {
-  position: absolute;
-  right: 0;
-  bottom: 62px;
 }
 .broadside-ring {
   width: 60px;
   height: 60px;
   border-radius: 50%;
-  padding: 0;
-  border: none;
-  cursor: pointer;
-  touch-action: none;
-  -webkit-user-select: none;
-  user-select: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2152,7 +2135,7 @@ onBeforeUnmount(() => {
 
 /*
  * The wrapper spans the whole page but stays click-through (pointer-events:
- * none) — only the stick and the buttons themselves re-enable it. Without
+ * none) — only the sticks and the buttons themselves re-enable it. Without
  * that, this being on top of everything (it has to be, to sit above the
  * canvas) would also swallow taps meant for the context prompt in the
  * middle of the screen.
@@ -2169,13 +2152,19 @@ onBeforeUnmount(() => {
   bottom: calc(20px + env(safe-area-inset-bottom, 0px));
   pointer-events: auto;
 }
+/* Mirrors the movement stick's corner, opposite side — see the aim-stick
+   sketch (right stick bottom-right, movement stick bottom-left). */
+.touch-controls__aim-stick {
+  position: absolute;
+  right: calc(20px + env(safe-area-inset-right, 0px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  pointer-events: auto;
+}
 .touch-btn {
   pointer-events: auto;
   position: absolute;
-  /* Bottom-right corner slot — правый борт moved up to make room (see
-     .broadside-hud--phone), left this open instead of Действие floating
-     above both rings. */
-  right: calc(16px + env(safe-area-inset-right, 0px));
+  /* Sits just left of the aim stick, same bottom row — direct sketch. */
+  right: calc(20px + 116px + 12px + env(safe-area-inset-right, 0px));
   bottom: calc(20px + env(safe-area-inset-bottom, 0px));
   width: 52px;
   height: 52px;
@@ -2193,6 +2182,25 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(217, 164, 65, 0.4);
   background: rgba(6, 20, 24, 0.6);
 }
+/* Opposite top corner from .world-exit-btn — same small round icon-button
+   treatment, the only on-screen way to open the inventory on a phone. */
+.touch-inventory-btn {
+  pointer-events: auto;
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(240, 234, 214, 0.88);
+  border: 1px solid rgba(26, 20, 16, 0.3);
+  color: #1a1410;
+  padding: 0;
+}
+.touch-inventory-btn svg { width: 17px; height: 17px; }
 
 /*
  * .world-page used to leave its height to Quasar's QPage component, which

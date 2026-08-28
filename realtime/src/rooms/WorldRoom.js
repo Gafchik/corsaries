@@ -19,11 +19,12 @@ const SHIP_SPEED_MULT = {
   boat: 0.75, schooner: 0.75, caravel: 0.75, brig: 0.75,
   frigate: 1.0, galleon: 1.25, corvette: 2.0, battleship: 1.5,
 }
-// Mirrors config/ships.php's cannon_count — always split evenly in two by
-// handleFire below (first half of slots = left broadside, second half =
-// right), so it needs to actually match what Ship::ensureCannonSlots (PHP)
-// creates, or a client's cannon list and the server's idea of "how many
-// guns actually fire" would disagree.
+// Mirrors config/ships.php's cannon_count — every slot now fires together
+// in one free-aimed volley (see handleFire/broadsideCannons; used to be
+// split evenly into a left/right broadside, fired independently), so it
+// still needs to actually match what Ship::ensureCannonSlots (PHP) creates,
+// or a client's cannon list and the server's idea of "how many guns
+// actually fire" would disagree.
 const SHIP_CANNON_COUNT = {
   boat: 6, schooner: 10, caravel: 14, brig: 16,
   frigate: 20, galleon: 24, corvette: 18, battleship: 30,
@@ -32,7 +33,7 @@ const SHIP_CANNON_COUNT = {
 // calibration damage/range are built to satisfy (tier N's maxed cannon
 // lands just under tier N+1's level-1) and for why speed is deliberately
 // NOT on that same curve (a Galleon's ball read as a pistol shot when it
-// was). Each cannon on a side now fires its OWN ball with its OWN
+// was). Each cannon on the deck now fires its OWN ball with its OWN
 // damage/range/speed (see broadsideCannons/handleFire) — no more
 // summing/averaging into one aggregate shot.
 //
@@ -54,14 +55,18 @@ const CANNON_BASE = {
   battleship: { damage: 94, range: 502, speed: 1000 },
 }
 const CANNON_LEVEL_BONUS_FRACTION = 0.1
-// How wide one broadside's volley fans out, in radians either side of the
-// dead-center aim line — these are real individual gun barrels along the
-// hull, not one wide blast, so this stays narrow. Mirrored client-side
+// How wide the volley fans out, in radians either side of the dead-center
+// aim line — these are real individual gun barrels, not one wide blast, so
+// each one still gets its own fixed launch angle (see handleFire). Doubled
+// from the old per-broadside value (0.16) now that a single volley is the
+// WHOLE gun deck at once (see broadsideCannons) instead of half of it —
+// keeps roughly the same angular gap between adjacent barrels instead of
+// cramming twice the guns into the old, narrower fan. Mirrored client-side
 // (WorldPage.vue's CANNON_SPREAD_HALF_ANGLE) purely for the aim-hold
 // preview to actually match what's about to fire; the server never trusts
 // the client's copy for anything that matters (hit resolution below uses
 // this value directly).
-const CANNON_SPREAD_HALF_ANGLE = 0.16
+const CANNON_SPREAD_HALF_ANGLE = 0.32
 // Reload is a fourth upgradeable stat, but deliberately NOT scaled like the
 // other three (see config/cannons.php's own comment) — same base cooldown
 // on every hull, a small flat per-level cut, so a maxed Battleship still
@@ -154,14 +159,17 @@ const BOT_AGGRO_RANGE = 960
 // infinitely persistent, and won't re-engage anyone for a cooldown after.
 const BOT_MAX_CHASE_MS = 15000
 const BOT_GIVE_UP_COOLDOWN_MS = 6000
-// "How much of a threat is this ship" — HP × total broadside damage (both
-// cannons of one side firing at once), the classic "how many exchanges can
-// it win" combat-power heuristic. Only ever used to weigh a BOT's own
-// fight-or-flee odds (see shouldBotEngage/nearbyHostilePower) — never
-// touches actual combat resolution, that's still purely handleFire/
-// broadsideCannons/tickCannonballs. Computed by hand from SHIP_MAX_HP ×
-// (SHIP_CANNON_COUNT/2 × CANNON_BASE.damage) — keep in sync if any of
-// those three change.
+// "How much of a threat is this ship" — HP × one volley's worth of damage,
+// the classic "how many exchanges can it win" combat-power heuristic. Only
+// ever used to weigh a BOT's own fight-or-flee odds (see
+// shouldBotEngage/nearbyHostilePower) — never touches actual combat
+// resolution, that's still purely handleFire/broadsideCannons/
+// tickCannonballs. Computed by hand from SHIP_MAX_HP × (SHIP_CANNON_COUNT/2
+// × CANNON_BASE.damage) — still half the deck, left over from when a
+// volley WAS half the deck (now it's the whole thing, see broadsideCannons)
+// but never updated since only the RATIO between two ships' numbers is ever
+// used, and doubling every entry here uniformly wouldn't change a single
+// ratio. Keep in sync if any of the three underlying constants change.
 const SHIP_POWER = {
   boat: 22500, schooner: 100000, caravel: 378000, brig: 680800,
   frigate: 2000000, galleon: 5382000, corvette: 3316500, battleship: 14100000,
@@ -269,7 +277,7 @@ export class WorldRoom extends Room {
       this.state.islands.push(island)
     }
 
-    this.lastFiredAt = new Map() // `${attackerId}:${side}` -> timestamp
+    this.lastFiredAt = new Map() // attackerId -> timestamp — one shared reload for the whole gun deck now (see broadsideCannons)
     // sessionId -> array of per-slot levels, loaded once on join (see
     // loadShipCannonLevels's own comment for why that's safe) — bots never
     // get an entry, handleFire falls back to a flat table for them instead.
@@ -311,9 +319,9 @@ export class WorldRoom extends Room {
       player.rotation = rotation
     })
 
-    this.onMessage('fire', (client, { side }) => {
-      if (side !== 'left' && side !== 'right') return
-      this.handleFire(client.sessionId, side, Date.now(), client)
+    this.onMessage('fire', (client, { angle }) => {
+      if (!Number.isFinite(angle)) return
+      this.handleFire(client.sessionId, angle, Date.now(), client)
     })
 
     this.onMessage('abordage_challenge', (client, { targetSessionId }) => {
@@ -485,28 +493,19 @@ export class WorldRoom extends Room {
   }
 
   /**
-   * Pushes both broadsides' real current range to the client, already
-   * translated to the UI-facing fireLeft/fireRight naming (the same
-   * inversion the 'fired' broadcast uses) — WorldPage.vue's aim-hold
-   * preview (lastKnownRange) otherwise only ever learned a side's range
-   * from that side's OWN first 'fired' broadcast, which meant a side that
-   * hadn't fired yet THIS session showed the small DEFAULT_AIM_RANGE
-   * fallback even on a ship whose real range was much bigger — an
-   * intermittent-feeling bug that was really just "whichever side you
-   * haven't fired from yet" (direct feedback: fired right, aimed left,
-   * got a tiny cone; fired left once, then it was correct). Called for
+   * Pushes the gun deck's real current max range to the client — the
+   * free-aim preview (lastKnownRange in WorldPage.vue) otherwise only
+   * learned it from this player's own first 'fired' broadcast, which meant
+   * a freshly (re)joined client showed the small DEFAULT_AIM_RANGE fallback
+   * until its first shot confirmed the real number. Called for
    * 'request_broadside_stats' (the client's own ask, once it's ready to
    * listen — see that handler's comment for why a plain onJoin push isn't
    * used) and 'refresh_ship' (cannon upgrades, a new hull change what the
    * answer would be, so it's worth re-sending unprompted there).
    */
   sendBroadsideStats(client, shipType, sessionId) {
-    const right = this.broadsideCannons(shipType, sessionId, 'right')
-    const left = this.broadsideCannons(shipType, sessionId, 'left')
-    client.send('broadside_stats', {
-      fireLeft: { range: Math.max(...right.cannons.map((c) => c.range)) },
-      fireRight: { range: Math.max(...left.cannons.map((c) => c.range)) },
-    })
+    const { cannons } = this.broadsideCannons(shipType, sessionId)
+    client.send('broadside_stats', { range: Math.max(...cannons.map((c) => c.range)) })
   }
 
   async onLeave(client) {
@@ -977,51 +976,25 @@ export class WorldRoom extends Room {
   }
 
   /**
-   * Turn side-on to the target rather than bow-on — cannons are on the
-   * broadsides, same rule the player's own fire uses. Derived from
-   * handleFire's own broadside vectors, not guessed: solving
-   * broadside_right(rotation) == unit vector toward the target gives
-   * rotation = toTarget + π (bow pointing away — its right side, opposite
-   * forward-rotated -90°, ends up facing the target); solving the same for
-   * 'left' gives rotation = toTarget (bow pointing straight at it).
-   *
-   * Which side to present is recomputed every tick now, weighted toward
-   * whichever cannon is actually off cooldown (mirrors the original's
-   * Move_in_Battle checking _ready_shoot_right/_ready_shoot_left
-   * independently — a bot with one side reloading should favor swinging
-   * its *ready* side around, not sit there presenting a side that can't
-   * fire). Combined with a much faster turn rate (see BOT_TURN_LERP), this
-   * is what stops a player from just circling a bot that can't keep its
-   * broadside on them.
+   * Free aim (see handleFire) decoupled firing direction from heading
+   * entirely — a bot no longer has to turn side-on to present a broadside
+   * before it can shoot, it can just fire straight at wherever the target
+   * currently is, from any facing, the instant its reload is up. Still
+   * turns to roughly face the target (not required for the shot to land,
+   * just reads better than a bot idly holding some unrelated heading while
+   * it fires) and holds position at range rather than closing further,
+   * same as the old broadside-presenting behavior did.
    */
   broadsideStep(botId, bot, runtime, target, now, deltaMs) {
     const toTarget = Math.atan2(target.player.y - bot.y, target.player.x - bot.x)
-    const rightBroadside = toTarget + Math.PI
-    const leftBroadside = toTarget
+    this.turnToward(bot, toTarget + Math.PI / 2)
+    this.advance(bot, 0, deltaMs)
 
     // Bots always sit at cannon level 0 (no upgrade to load), so their real
     // reload time is exactly RELOAD_BASE_MS, unmodified — same number
     // FIRE_COOLDOWN_MS used to be before reload became a per-player stat.
-    const rightReady = now - (this.lastFiredAt.get(`${botId}:right`) ?? 0) >= RELOAD_BASE_MS
-    const leftReady = now - (this.lastFiredAt.get(`${botId}:left`) ?? 0) >= RELOAD_BASE_MS
-
-    let side
-    if (rightReady && !leftReady) side = 'right'
-    else if (leftReady && !rightReady) side = 'left'
-    // Both (or neither) ready — whichever needs the smaller turn, so the
-    // bot isn't spinning further than it has to.
-    else side = Math.abs(angleDiff(bot.rotation, rightBroadside)) < Math.abs(angleDiff(bot.rotation, leftBroadside)) ? 'right' : 'left'
-
-    const desired = side === 'right' ? rightBroadside : leftBroadside
-
-    this.turnToward(bot, desired)
-    // Hold position rather than closing further once side-on — original
-    // Move_in_Battle circles at range rather than ramming.
-    this.advance(bot, 0, deltaMs)
-
-    if (Math.abs(angleDiff(bot.rotation, desired)) < 0.15) {
-      this.handleFire(botId, side, now)
-    }
+    const ready = now - (this.lastFiredAt.get(botId) ?? 0) >= RELOAD_BASE_MS
+    if (ready) this.handleFire(botId, toTarget, now)
   }
 
   turnToward(bot, desiredHeading) {
@@ -1055,7 +1028,7 @@ export class WorldRoom extends Room {
   // client is only ever set for a real player's own 'fire' message (see the
   // onMessage handler above) — bots call this with no client to notify,
   // since they're not a real connection and there's nothing to tell.
-  handleFire(attackerId, side, now = Date.now(), client = null) {
+  handleFire(attackerId, angle, now = Date.now(), client = null) {
     const attacker = this.state.players.get(attackerId)
     if (!attacker) return
     // Bots already won't target a player standing in port territory (see
@@ -1076,19 +1049,22 @@ export class WorldRoom extends Room {
 
     // Computed before the cooldown check now — reload is itself an
     // upgradeable stat (see broadsideCannons/RELOAD_LEVEL_BONUS_FRACTION),
-    // so "is this side off cooldown yet" needs this side's own real reload
+    // so "is this player off cooldown yet" needs their own real reload
     // time, not the flat constant it used to be.
-    const { cannons, cooldown } = this.broadsideCannons(attacker.shipType, attackerId, side, attacker.isBot)
+    const { cannons, cooldown } = this.broadsideCannons(attacker.shipType, attackerId, attacker.isBot)
 
-    const cooldownKey = `${attackerId}:${side}`
-    const lastFired = this.lastFiredAt.get(cooldownKey) ?? 0
+    const lastFired = this.lastFiredAt.get(attackerId) ?? 0
     if (now - lastFired < cooldown) return
-    this.lastFiredAt.set(cooldownKey, now)
+    this.lastFiredAt.set(attackerId, now)
 
-    const fx = Math.sin(attacker.rotation)
-    const fy = -Math.cos(attacker.rotation)
-    const dir = side === 'right' ? { x: fy, y: -fx } : { x: -fy, y: fx }
-    const baseAngle = Math.atan2(dir.y, dir.x)
+    // Free aim: the whole gun deck fires together in whatever direction the
+    // player (or bot — see broadsideStep) is pointing at, not a direction
+    // derived from the ship's own heading. angle is already the real
+    // launch-vector angle (Math.cos/sin(angle) IS the direction), same
+    // convention the client computes it in (toward the world cursor
+    // position, or a stick angle) — no ship-rotation math needed here at
+    // all now.
+    const baseAngle = angle
     const count = cannons.length
 
     // Every cannon in the volley gets its own launch angle, fanned evenly
@@ -1097,11 +1073,11 @@ export class WorldRoom extends Room {
     // damage/range/speed from its own upgrade level.
     for (let i = 0; i < count; i++) {
       const t = count === 1 ? 0 : i / (count - 1) - 0.5 // -0.5..0.5
-      const angle = baseAngle + t * 2 * CANNON_SPREAD_HALF_ANGLE
+      const shotAngle = baseAngle + t * 2 * CANNON_SPREAD_HALF_ANGLE
       const cannon = cannons[i]
       this.cannonballs.push({
         attackerId, x: attacker.x, y: attacker.y,
-        dx: Math.cos(angle), dy: Math.sin(angle), traveled: 0,
+        dx: Math.cos(shotAngle), dy: Math.sin(shotAngle), traveled: 0,
         damage: cannon.damage, range: cannon.range, speed: cannon.speed,
       })
     }
@@ -1113,37 +1089,37 @@ export class WorldRoom extends Room {
     // dealt), just enough to look right: how many balls, how far, how fast.
     const range = Math.max(...cannons.map((c) => c.range))
     const speed = Math.round(cannons.reduce((sum, c) => sum + c.speed, 0) / count)
-    this.broadcast('fired', { attackerId, side, count, range, speed })
+    this.broadcast('fired', { attackerId, angle: baseAngle, count, range, speed })
   }
 
   /**
-   * Per-cannon stats for one broadside (half the ship's cannons, split per
-   * SHIP_CANNON_COUNT — first half of slots is 'left', second half
-   * 'right', an arbitrary but consistent split, not tied to which UI
-   * button a player actually calls "left"). Each entry is one gun's own
-   * damage/range/speed at its own upgrade level — "качать каждую пушку
-   * отдельно" means each one actually fires its own ball now, not just a
+   * Per-cannon stats for the WHOLE gun deck — both former broadsides now
+   * fire together in one free-aimed volley (see handleFire), so every slot
+   * in SHIP_CANNON_COUNT contributes, not just half. Each entry is one
+   * gun's own damage/range/speed at its own upgrade level — "качать каждую
+   * пушку отдельно" means each one actually fires its own ball, not just a
    * separately-tracked number folded into one aggregate shot. Cooldown is
-   * still shared across the whole side (one crew reloading one battery),
-   * based on the side's AVERAGE level. Uses the player's real upgrade
-   * levels if known (see playerCannonLevels, loaded once on join) or a flat
-   * level-0 for every slot otherwise — bots (no account to own an
-   * upgrade), or a human whose levels haven't finished loading yet — same
-   * numbers a stock, unupgraded hull of that type would have either way.
+   * shared across the whole deck (one crew reloading), based on the
+   * AVERAGE level across every cannon. Uses the player's real upgrade
+   * levels if known (see playerCannonLevels, loaded once on join, still
+   * indexed per physical slot exactly as the Оружейник's left/right
+   * batteries assign them — merging which slots fire together didn't
+   * change what each slot's own upgrade level is) or a flat level-0 for
+   * every slot otherwise — bots (no account to own an upgrade), or a human
+   * whose levels haven't finished loading yet — same numbers a stock,
+   * unupgraded hull of that type would have either way.
    */
-  broadsideCannons(shipType, sessionId, side, isBot = false) {
+  broadsideCannons(shipType, sessionId, isBot = false) {
     const totalCannons = SHIP_CANNON_COUNT[shipType] ?? SHIP_CANNON_COUNT.boat
-    const perSide = Math.max(1, Math.floor(totalCannons / 2))
     const levels = this.playerCannonLevels.get(sessionId)
     const base = CANNON_BASE[shipType] ?? CANNON_BASE.boat
-    const offset = side === 'right' ? perSide : 0
     // See BOT_DAMAGE_MULT's own comment — a bot's guns, not a bot's hull.
     const damageMult = isBot ? BOT_DAMAGE_MULT : 1
 
     const cannons = []
     let levelSum = 0
-    for (let i = 0; i < perSide; i++) {
-      const level = levels?.[offset + i] ?? 0
+    for (let i = 0; i < totalCannons; i++) {
+      const level = levels?.[i] ?? 0
       const mult = 1 + CANNON_LEVEL_BONUS_FRACTION * level
       cannons.push({
         damage: Math.round(base.damage * mult * damageMult),
@@ -1152,10 +1128,10 @@ export class WorldRoom extends Room {
       })
       levelSum += level
     }
-    // Reload uses the SIDE'S AVERAGE level, same reasoning speed used to —
-    // deliberately not the fastest gun in the battery (that'd make one
-    // upgraded cannon drag the whole broadside's cadence up) or the slowest.
-    const avgLevel = levelSum / perSide
+    // Reload uses the DECK'S AVERAGE level, same reasoning speed used to —
+    // deliberately not the fastest gun (that'd make one upgraded cannon
+    // drag the whole deck's cadence up) or the slowest.
+    const avgLevel = levelSum / totalCannons
     const cooldown = Math.round(RELOAD_BASE_MS * (1 - RELOAD_LEVEL_BONUS_FRACTION * avgLevel))
     return { cannons, cooldown }
   }
@@ -1248,7 +1224,21 @@ export class WorldRoom extends Room {
         // The lost gold/cargo (not the crew) becomes the drop.
         const survivalFraction = 1 - (DEATH_LOSS_MIN + Math.random() * (DEATH_LOSS_MAX - DEATH_LOSS_MIN))
         applyDeathPenalty(target.userId, survivalFraction)
-          .then(({ lostGold, lostProducts }) => this.spawnCargoDrop(deathX, deathY, lostGold, lostProducts))
+          .then(({ lostGold, lostProducts, lostSailors }) => {
+            this.spawnCargoDrop(deathX, deathY, lostGold, lostProducts)
+            // Targeted, not broadcast — nobody but the victim needs to know
+            // what they personally lost. Sent once the DB round-trip
+            // actually confirms the real numbers, same reasoning as every
+            // other "don't guess, ask/tell after the fact" pattern in this
+            // room (see sendBroadsideStats's own comment) — a client-side
+            // guess from survivalFraction alone couldn't know the exact
+            // pre-loss totals (gold clamps at what the player actually had,
+            // sailors/products round down from real DB values). The client
+            // may have already disconnected/left by the time this resolves
+            // (async DB round-trip) — find() just returns undefined then,
+            // same as any other post-await client lookup in this file.
+            this.clients.find((c) => c.sessionId === targetId)?.send('death_penalty', { lostGold, lostProducts, lostSailors })
+          })
           .catch((e) => console.error('applyDeathPenalty failed', e))
 
         const port = this.ports[Math.floor(Math.random() * this.ports.length)]

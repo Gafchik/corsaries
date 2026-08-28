@@ -7,16 +7,26 @@
 const STORAGE_KEY = 'corsaries_controls_v1'
 
 export const MOVE_ACTIONS = ['moveUp', 'moveDown', 'moveLeft', 'moveRight']
-export const PRESS_ACTIONS = ['fireLeft', 'fireRight', 'action', 'inventory', 'back']
-export const ACTIONS = [...MOVE_ACTIONS, ...PRESS_ACTIONS]
+export const PRESS_ACTIONS = ['action', 'inventory', 'back']
+// Fire has no keyboard equivalent — a mouse click aims-and-fires directly
+// (see fireFree/updateAiming in WorldPage.vue), hardcoded there the same
+// way mouse buttons always have been, never through this rebind system. A
+// gamepad has no mouse to do that job, so it gets its own dedicated,
+// rebindable button instead — kept out of the shared PRESS_ACTIONS (and so
+// out of the keyboard tab entirely, see ControlsPage.vue) since offering a
+// keyboard rebind for it would just be a dead binding nothing reads.
+export const GAMEPAD_ONLY_ACTIONS = ['fire']
+export const ACTIONS = [...MOVE_ACTIONS, ...PRESS_ACTIONS, ...GAMEPAD_ONLY_ACTIONS]
+// Internal only — what update()'s gamepad button polling loop iterates,
+// unlike the exported PRESS_ACTIONS the keyboard tab also reads from.
+const GAMEPAD_PRESS_ACTIONS = [...PRESS_ACTIONS, ...GAMEPAD_ONLY_ACTIONS]
 
 export const ACTION_LABELS = {
   moveUp: 'Вперёд',
   moveDown: 'Назад (движение)',
   moveLeft: 'Влево',
   moveRight: 'Вправо',
-  fireLeft: 'Огонь — левый борт',
-  fireRight: 'Огонь — правый борт',
+  fire: 'Огонь',
   action: 'Действие (порт / абордаж)',
   inventory: 'Инвентарь',
   back: 'Отмена / выйти',
@@ -26,15 +36,15 @@ export const ACTION_LABELS = {
 // AZERTY keyboard too, unlike .key).
 const DEFAULT_KEYBOARD = {
   moveUp: 'KeyW', moveDown: 'KeyS', moveLeft: 'KeyA', moveRight: 'KeyD',
-  fireLeft: 'KeyQ', fireRight: 'KeyE', action: 'KeyF', inventory: 'KeyI', back: 'Escape',
+  action: 'KeyF', inventory: 'KeyI', back: 'Escape',
 }
 
 // Movement isn't in here on purpose — a gamepad's left stick drives
 // movement directly (see getMoveVector), the same way it does in every
 // other game; only the discrete face/shoulder buttons are rebindable.
+// Aiming is the right stick (see getAimVector) for the same reason.
 const DEFAULT_GAMEPAD = {
-  fireLeft: 4, // LB / L1
-  fireRight: 5, // RB / R1
+  fire: 7, // RT / R2
   action: 0, // A / Cross
   inventory: 3, // Y / Triangle
   back: 1, // B / Circle
@@ -80,6 +90,7 @@ class Controls {
     this.capture = null // { deviceType, resolve } while a rebind is in progress
     this.captureArmed = false // true once whatever activated capture mode has been released — see captureNext
     this.touchVector = { x: 0, y: 0 } // set by the on-screen joystick, see setTouchVector
+    this.aimVector = { x: 0, y: 0 } // set by the on-screen aim stick, see setAimVector
     this.touchHeld = new Set() // actions currently held via a touch button — see touchHoldStart
 
     window.addEventListener('keydown', this.handleKeydown)
@@ -198,6 +209,36 @@ class Controls {
     this.touchVector.y = y
   }
 
+  /**
+   * Free-aim direction, continuous — a gamepad's right stick or the
+   * on-screen aim stick (see TouchJoystick's 'aim' variant), read every
+   * frame by WorldScene's updateAiming the same way getMoveVector already
+   * reads movement input. Unlike movement, gamepad and touch are never
+   * combined here (a phone with a gamepad paired hides the on-screen stick
+   * entirely — see showTouchControls — so only one is ever actually live);
+   * whichever is past its deadzone simply wins.
+   */
+  getAimVector() {
+    const pad = this.firstGamepad()
+    if (pad) {
+      const sx = pad.axes[2] ?? 0
+      const sy = pad.axes[3] ?? 0
+      if (Math.hypot(sx, sy) > STICK_DEADZONE) return { x: sx, y: sy }
+    }
+    return { x: this.aimVector.x, y: this.aimVector.y }
+  }
+
+  /** Fed by the on-screen aim stick's drag position, both already in [-1, 1] — see TouchJoystick's 'aim' variant. */
+  setAimVector(x, y) {
+    this.aimVector.x = x
+    this.aimVector.y = y
+  }
+
+  /** True while the on-screen aim stick (touch only — see setAimVector) is actively pushed — lets the touch Действие button double as the fire trigger only while there's actually a deliberate aim direction to fire toward, see WorldPage.vue's touch-controls template. */
+  isAimStickActive() {
+    return Math.hypot(this.aimVector.x, this.aimVector.y) > STICK_DEADZONE
+  }
+
   /** A touch button standing in for a discrete keypress/gamepad-button press — same emit() path, same listeners. */
   touchPress(action) {
     this.emit(action)
@@ -245,7 +286,7 @@ class Controls {
       return
     }
 
-    for (const action of PRESS_ACTIONS) {
+    for (const action of GAMEPAD_PRESS_ACTIONS) {
       const btnIndex = this.bindings.gamepad[action]
       const pressed = !!pad.buttons[btnIndex]?.pressed
       if (pressed && !this.gamepadPrevPressed[action]) this.emit(action)

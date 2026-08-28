@@ -36,7 +36,7 @@
         {{ gamepadConnected ? 'Геймпад подключён' : 'Геймпад не обнаружен' }}
       </div>
       <div class="row__label row__label--note">Движение всегда на левом стике — тут только кнопки</div>
-      <div class="row" v-for="a in PRESS_ACTIONS" :key="'gp-' + a">
+      <div class="row" v-for="a in GAMEPAD_ACTIONS" :key="'gp-' + a">
         <div class="row__label">{{ ACTION_LABELS[a] }}</div>
         <button
           class="bind-btn"
@@ -59,7 +59,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { controls, hasRebindableInput, isPhone, ACTION_LABELS, GAMEPAD_BUTTON_LABELS, MOVE_ACTIONS, PRESS_ACTIONS } from '@/services/controls'
+import { controls, hasRebindableInput, isPhone, ACTION_LABELS, GAMEPAD_BUTTON_LABELS, MOVE_ACTIONS, PRESS_ACTIONS, GAMEPAD_ONLY_ACTIONS } from '@/services/controls'
 import { useMenuNav } from '@/composables/useMenuNav'
 
 const router = useRouter()
@@ -69,6 +69,9 @@ const router = useRouter()
 if (!hasRebindableInput()) router.replace('/')
 
 const KEYBOARD_ACTIONS = [...MOVE_ACTIONS, ...PRESS_ACTIONS]
+// 'fire' has no keyboard equivalent (a mouse click drives it directly, see
+// controls.js's own comment) — only the gamepad tab offers it to rebind.
+const GAMEPAD_ACTIONS = [...PRESS_ACTIONS, ...GAMEPAD_ONLY_ACTIONS]
 const pageRef = ref(null)
 
 const bindings = ref(structuredClone(controls.getBindings()))

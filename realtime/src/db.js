@@ -77,12 +77,13 @@ const DEATH_GOLD_PENALTY_FRACTION = 0.03
 // penalty ever actually landed — until caught by reading the realtime
 // container's own error logs after deploy.
 //
-// Returns what was actually lost (gold + per-product amounts) — the exact
-// same numbers the UPDATEs below compute, just read back before/after
-// instead of trusted from a RETURNING clause across three separate tables
-// — so the caller (see resolveHit/spawnCargoDrop in WorldRoom.js) can drop
-// it as a floating crate instead of it just vanishing into the death
-// penalty the way it used to.
+// Returns what was actually lost (gold + per-product amounts + total crew)
+// — the exact same numbers the UPDATEs below compute, just read back
+// before/after instead of trusted from a RETURNING clause across three
+// separate tables — so the caller (see resolveHit/spawnCargoDrop in
+// WorldRoom.js) can drop the gold/cargo as a floating crate and tell the
+// victim what actually happened, instead of it just silently vanishing
+// into the death penalty the way it used to.
 export async function applyDeathPenalty(userId, survivalFraction) {
   const shipRow = await pool.query('SELECT id, type FROM ships WHERE user_id = $1', [userId])
   const shipId = shipRow.rows[0]?.id ?? null
@@ -92,6 +93,9 @@ export async function applyDeathPenalty(userId, survivalFraction) {
   const productsBefore = shipId
     ? await pool.query('SELECT type, quantity FROM ship_products WHERE ship_id = $1', [shipId])
     : { rows: [] }
+  const sailorsBefore = shipId
+    ? await pool.query('SELECT COALESCE(SUM(count), 0) AS total FROM ship_sailors WHERE ship_id = $1', [shipId])
+    : { rows: [{ total: 0 }] }
 
   const coinsBefore = before.rows[0]?.coins ?? 0
   const goldPenalty = Math.min(coinsBefore, Math.round((SHIP_PRICE[shipType] ?? SHIP_PRICE.boat) * DEATH_GOLD_PENALTY_FRACTION))
@@ -114,7 +118,9 @@ export async function applyDeathPenalty(userId, survivalFraction) {
     const lost = row.quantity - Math.floor(row.quantity * survivalFraction)
     if (lost > 0) lostProducts[row.type] = lost
   }
-  return { lostGold, lostProducts }
+  const sailorsTotal = Number(sailorsBefore.rows[0]?.total ?? 0)
+  const lostSailors = sailorsTotal - Math.floor(sailorsTotal * survivalFraction)
+  return { lostGold, lostProducts, lostSailors }
 }
 
 // Keep in sync with api/config/products.php's weight column and
