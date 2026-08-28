@@ -1856,6 +1856,11 @@ async function toggleInfo() {
 function notifyCargoClaimed(gold, products) {
   const parts = []
   let weightDelta = 0
+  // WorldRoom's claimCargoDropAsync already persisted this to the DB
+  // (awardBounty) — coins.value is a local display cache (see refreshCargo)
+  // that nothing else keeps in sync with a pickup, so without this the
+  // inventory overlay showed a stale gold count until the next port visit.
+  if (gold > 0) coins.value += gold
   if (gold > 0) parts.push(`${gold} золота`)
   for (const [type, qty] of Object.entries(products || {})) {
     if (qty > 0) {
