@@ -74,11 +74,11 @@
            cone, release to fire, same gesture as a held mouse button (see
            updateAiming) — Действие stays its plain context-action self, its
            own reload progress shown via the same background style anyway.
-           Инвент sits alone in the opposite top corner from the exit
-           button, offset below the minimap's own top-right footprint (see
-           .touch-inventory-btn) — the only on-screen way to open the
-           inventory on a phone (keyboard I / gamepad Y have no touch
-           equivalent otherwise). -->
+           Инвент sits in the same top-left row as the exit button and
+           coordinates, not the top-right corner opposite it (see
+           .touch-inventory-btn's own comment for why) — the only on-screen
+           way to open the inventory on a phone (keyboard I / gamepad Y
+           have no touch equivalent otherwise). -->
       <div v-if="showTouchControls && !activePortId" class="touch-controls">
         <TouchJoystick class="touch-controls__stick" />
         <TouchJoystick class="touch-controls__aim-stick" variant="aim" />
@@ -2180,21 +2180,22 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(217, 164, 65, 0.4);
   background: rgba(6, 20, 24, 0.6);
 }
-/* Opposite top corner from .world-exit-btn — same small round icon-button
-   treatment, the only on-screen way to open the inventory on a phone.
-   Offset well below the minimap's own top-right corner (minimapLayout in
-   WorldPage.vue clamps its size to at most 200px, flush against the same
-   12px margin) instead of sitting at that same top offset — the two sat
-   exactly on top of each other otherwise, the button invisible underneath
-   (direct feedback: "no inventory button on phone" — it was there, just
-   covered). Errs toward extra clearance on a smaller screen (where the
-   real minimap is smaller than the 200px this assumes) over ever
-   overlapping again on a larger one. */
+/* Same top-left row as .world-exit-btn + the coordinate readout, right
+   after the coords (COORD_TEXT_X=56 plus room for its widest realistic
+   string, "X: 4800 Y: 4800" at MAP_SIZE) — not the top-right corner
+   opposite the exit button like the original sketch (two rounds of direct
+   feedback: it landed exactly on top of the minimap in portrait — same
+   corner, same 12px margin — and moving it down by the minimap's
+   worst-case size instead put it in the aim stick's way in landscape,
+   where the shorter viewport meant that same pixel offset landed near the
+   BOTTOM). The minimap and the aim stick both live on the right side in
+   every orientation; the top-left row next to the exit button is the one
+   spot that's never contested by either. */
 .touch-inventory-btn {
   pointer-events: auto;
   position: absolute;
-  top: calc(12px + 200px + 10px + env(safe-area-inset-top, 0px));
-  right: calc(12px + env(safe-area-inset-right, 0px));
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  left: calc(200px + env(safe-area-inset-left, 0px));
   width: 34px;
   height: 34px;
   border-radius: 50%;
