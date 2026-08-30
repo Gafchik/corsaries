@@ -189,11 +189,12 @@ class PortController extends Controller
         $newPrice = config("ships.{$data['type']}.price");
         $isDowngrade = $newPrice < $oldPrice;
 
-        // Computed from the OLD ship/cannons before anything below deletes
-        // or replaces them.
+        // Computed from the OLD ship/cannons/rigging before anything below
+        // deletes or resets them.
         $shipRefund = $isDowngrade ? $this->tradeInRefund($oldPrice, $newPrice) : 0;
         $cannonRefund = $isDowngrade ? $this->cannonInvestmentRefund($ship) : 0;
-        $totalRefund = min($shipRefund + $cannonRefund, $newPrice);
+        $riggingRefund = $isDowngrade ? $this->riggingInvestmentRefund($ship) : 0;
+        $totalRefund = min($shipRefund + $cannonRefund + $riggingRefund, $newPrice);
         $netCost = $newPrice - $totalRefund;
 
         if ($request->user()->coins < $netCost) {
@@ -203,7 +204,15 @@ class PortController extends Controller
         if ($netCost > 0) {
             $request->user()->decrement('coins', $netCost);
         }
-        $ship->update(['type' => $data['type'], 'hp' => config("ships.{$data['type']}.max_hp")]);
+        $ship->update([
+            'type' => $data['type'],
+            'hp' => config("ships.{$data['type']}.max_hp"),
+            // Same reasoning as cannons just below — Оснастка is tied to
+            // the hull it was bolted onto, not carried over to a new one.
+            'sails_level' => 0,
+            'hull_level' => 0,
+            'tackle_level' => 0,
+        ]);
 
         // Cannons never carry over between hulls now — every swap starts
         // with fresh, stock level-0 guns (a downgrade's old investment is
@@ -219,7 +228,7 @@ class PortController extends Controller
         return response()->json([
             'ship' => ShipController::serialize($ship->fresh(['products', 'sailors'])),
             'coins' => $request->user()->fresh()->coins,
-            'refund' => ['ship' => $shipRefund, 'cannons' => $cannonRefund, 'total' => $totalRefund],
+            'refund' => ['ship' => $shipRefund, 'cannons' => $cannonRefund, 'rigging' => $riggingRefund, 'total' => $totalRefund],
         ]);
     }
 
@@ -386,10 +395,40 @@ class PortController extends Controller
      */
     private function cannonInvestmentRefund(\App\Models\Ship $ship): int
     {
-        $levelCosts = config('cannons.level_cost');
-        $spent = ShipCannon::where('ship_id', $ship->id)->get()->sum(
-            fn (ShipCannon $cannon) => array_sum(array_slice($levelCosts, 0, $cannon->level))
-        );
+        // Routed through $ship->cannonUpgradeCost() rather than reading
+        // config('cannons.level_cost') directly — that config is now just
+        // the Линкор-tier baseline (see its own comment on cost_multiplier),
+        // and this ship's actual type-scaled cost is what was really spent.
+        // Reading the flat baseline instead would refund a Шлюпка's cheap
+        // real spend at the Линкор's much higher flat rate — free gold.
+        $spent = ShipCannon::where('ship_id', $ship->id)->get()->sum(function (ShipCannon $cannon) use ($ship) {
+            $total = 0;
+            for ($level = 0; $level < $cannon->level; $level++) {
+                $total += $ship->cannonUpgradeCost($level) ?? 0;
+            }
+
+            return $total;
+        });
+
+        return (int) round($spent * 0.2);
+    }
+
+    /**
+     * Same 20%-back logic as cannonInvestmentRefund, for Оснастка's three
+     * ship-wide tracks (see config/rigging.php) instead of per-cannon-slot
+     * rows — sum of riggingUpgradeCost() for every level actually paid for
+     * on each of sails/hull/tackle, at 20¢ on the gold. Must run BEFORE
+     * buyShip resets sails_level/hull_level/tackle_level to 0 for the new type.
+     */
+    private function riggingInvestmentRefund(\App\Models\Ship $ship): int
+    {
+        $spent = 0;
+        foreach (config('rigging.tracks') as $meta) {
+            $currentLevel = $ship->{$meta['column']};
+            for ($level = 0; $level < $currentLevel; $level++) {
+                $spent += $ship->riggingUpgradeCost($level) ?? 0;
+            }
+        }
 
         return (int) round($spent * 0.2);
     }

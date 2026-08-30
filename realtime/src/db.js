@@ -37,6 +37,15 @@ export async function loadShipCannonLevels(userId) {
   return rows.map((r) => r.level)
 }
 
+/** Оснастка's three ship-wide levels — see api/config/rigging.php and WorldRoom.js's SHIP_STATS_BASE for how these turn into an actual speed/protection/dodge boost. */
+export async function loadShipRigging(userId) {
+  const { rows } = await pool.query(
+    `SELECT s.sails_level, s.hull_level, s.tackle_level FROM ships s WHERE s.user_id = $1`,
+    [userId],
+  )
+  return rows[0] ?? { sails_level: 0, hull_level: 0, tackle_level: 0 }
+}
+
 export async function saveShip(userId, { x, y, hp }) {
   await pool.query('UPDATE ships SET x = $1, y = $2, hp = $3, updated_at = now() WHERE user_id = $4', [x, y, hp, userId])
 }

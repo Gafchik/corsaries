@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['user_id', 'type', 'hp', 'x', 'y'])]
+#[Fillable(['user_id', 'type', 'hp', 'x', 'y', 'sails_level', 'hull_level', 'tackle_level'])]
 class Ship extends Model
 {
     public function user(): BelongsTo
@@ -66,17 +66,56 @@ class Ship extends Model
         ];
     }
 
-    /** Gold to go from $level to $level+1, or null once already at the cap. */
+    /** Gold to go from $level to $level+1, or null once already at the cap — see config/cannons.php's own comment on cost_multiplier for why this isn't the same flat number on every hull. */
     public function cannonUpgradeCost(int $level): ?int
     {
         $costs = config('cannons.level_cost');
+        if (!isset($costs[$level])) {
+            return null;
+        }
+        $multiplier = config("cannons.cost_multiplier.{$this->type}") ?? 1;
 
-        return $costs[$level] ?? null;
+        return (int) round($costs[$level] * $multiplier);
     }
 
     public function stats(): array
     {
         return config("ships.{$this->type}");
+    }
+
+    /**
+     * This hull's own base speed/protection/dodge (see stats()) boosted by
+     * whatever Оснастка level is in that track — see config/rigging.php's
+     * own comment for why this is a flat +10%/level rather than calibrated
+     * against the next ship tier the way cannonStatsAt is.
+     */
+    public function riggingStatsAt(string $track, int $level): float
+    {
+        $meta = config("rigging.tracks.{$track}");
+        $base = $this->stats()[$meta['stat']];
+        $multiplier = 1 + config('rigging.level_bonus_fraction') * $level;
+
+        return $base * $multiplier;
+    }
+
+    /** This ship's CURRENT effective speed/protection/dodge, i.e. riggingStatsAt() at whatever level is actually stored. */
+    public function effectiveStat(string $track): float
+    {
+        $meta = config("rigging.tracks.{$track}");
+
+        return $this->riggingStatsAt($track, $this->{$meta['column']});
+    }
+
+    /** Gold to go from $level to $level+1 in one Оснастка track, or null once already at the cap — same per-tier scaling as cannonUpgradeCost, see config/rigging.php's own comment. */
+    public function riggingUpgradeCost(int $level): ?int
+    {
+        $costs = config('rigging.level_cost');
+        if (!isset($costs[$level])) {
+            return null;
+        }
+        $multiplier = config("rigging.cost_multiplier.{$this->type}") ?? 1;
+
+        return (int) round($costs[$level] * $multiplier);
     }
 
     public function maxHp(): int

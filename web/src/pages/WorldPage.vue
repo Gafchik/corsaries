@@ -108,7 +108,7 @@
         :key="activePortId"
         :port-id="activePortId"
         @close="activePortId = null"
-        @ship-changed="room.send('refresh_ship')"
+        @ship-changed="onShipChanged"
       />
     </div>
   </q-page>
@@ -703,7 +703,15 @@ class WorldScene extends Phaser.Scene {
 
     const me = this.room.state.players.get(this.room.sessionId)
     this.myMaxHp = me?.maxHp ?? 500
-    this.mySpeed = SHIP_SPEED * (SHIP_SPEED_MULT[me?.shipType] ?? 1)
+    // Stock per-type multiplier until the first refreshShipStats() (see
+    // WorldPage.vue) resolves and corrects it via setSpeedMult — Паруса
+    // (see config/rigging.php) isn't part of the Player schema, same
+    // reasoning as cargo capacity not being either, so this starts as a
+    // reasonable guess (right for anyone with no Паруса upgrade at all,
+    // which is everyone on their very first ship) rather than the real
+    // number from the instant the scene exists.
+    this.speedMult = SHIP_SPEED_MULT[me?.shipType] ?? 1
+    this.mySpeed = SHIP_SPEED * this.speedMult
     this.ship = this.physics.add.sprite(me?.x ?? 1200, me?.y ?? 1200, `ship-${me?.shipType ?? 'boat'}`)
     this.ship.setScale(SHIP_VISUAL_SCALE[me?.shipType] ?? 0.5)
     // Arcade bodies don't reliably follow a post-creation setScale() across
@@ -733,7 +741,7 @@ class WorldScene extends Phaser.Scene {
     this.myHpBar = this.createHpBar(this.ship.x, this.ship.y + HP_BAR_Y_OFFSET)
     // Cargo weight/capacity aren't in the Player schema at all (see
     // setCargo's own comment) — starts at a harmless 0/1 until
-    // refreshCargo() in WorldPage.vue resolves its first api.getShip().
+    // refreshShipStats() in WorldPage.vue resolves its first api.getShip().
     // cargoReady gates addCargoWeight (see its own comment) — without it, a
     // cargo pickup landing before that first fetch resolves added a real
     // weight on top of the still-default capacity of 1, showing the bar as
@@ -861,7 +869,14 @@ class WorldScene extends Phaser.Scene {
     // schema patch that triggers this in the first place.
     $(this.meRef).onChange(() => {
       this.myMaxHp = this.meRef.maxHp
-      this.mySpeed = SHIP_SPEED * (SHIP_SPEED_MULT[this.meRef.shipType] ?? 1)
+      // Stock multiplier for the new type — same "reasonable guess until
+      // refreshShipStats() corrects it" as create()'s own init, since a
+      // hull swap (what actually triggers this) always resets Паруса to 0
+      // anyway (see PortController::buyShip), so this guess happens to be
+      // exactly right immediately after a purchase; only a same-hull
+      // Паруса upgrade needs the later REST correction to actually show.
+      this.speedMult = SHIP_SPEED_MULT[this.meRef.shipType] ?? 1
+      this.mySpeed = SHIP_SPEED * this.speedMult
       // setVelocity below is capped by the Arcade body's own maxVelocity —
       // set once from the OLD mySpeed back in create() and never touched
       // since. Recomputing mySpeed alone silently did nothing: a faster
@@ -996,6 +1011,19 @@ class WorldScene extends Phaser.Scene {
         const targetSprite = this.otherShips.get(targetId)
         if (targetSprite) this.spawnDamageNumber(targetSprite.x, targetSprite.y, damage)
       }
+    })
+
+    // Оснастка's Такелаж (see resolveHit in WorldRoom.js) — a shot that
+    // reached the target but got evaded, distinct from a clean miss (which
+    // never reaches here at all, the ball just runs out of range). Same
+    // "stop the one ball that resolved, leave the rest of the volley
+    // flying" reasoning as 'hit', just a floating "Уворот" instead of a
+    // damage number (see spawnFloatingText) — no HP change, nothing else to do.
+    this.room.onMessage('dodged', ({ attackerId, targetId }) => {
+      const targetX = targetId === mySessionId ? this.ship.x : this.otherShips.get(targetId)?.x
+      const targetY = targetId === mySessionId ? this.ship.y : this.otherShips.get(targetId)?.y
+      if (targetX !== undefined) this.stopNearestCannonball(attackerId, targetX, targetY)
+      if (targetX !== undefined) this.spawnFloatingText(targetX, targetY, 'Уворот', '#9fd8ff')
     })
 
     // The server now actually stops a ball at the shoreline (see
@@ -1141,23 +1169,23 @@ class WorldScene extends Phaser.Scene {
    * that rises and fades, same tween shape as the '+amount золота' bounty
    * toast a bit further up, just angrier-colored and a size bigger so it
    * still reads clearly mid-fight with cannonballs and other ships around.
+   * The spark reads as an impact, so it's specific to an actual hit — see
+   * spawnFloatingText for the bare rise-and-fade text a dodge reuses
+   * without it (nothing actually struck the hull).
    */
   spawnDamageNumber(x, y, damage) {
     const spark = this.add.image(x - 16, y - 34, 'damage-spark').setDepth(20)
+    this.tweens.add({ targets: spark, y: '-=34', alpha: 0, duration: 900, onComplete: () => spark.destroy() })
+    this.spawnFloatingText(x, y, `−${damage}`, '#ff9d94')
+  }
+
+  /** Bare rising/fading text over a world point — shared tween shape behind spawnDamageNumber and the 'dodged' handler's "Уворот" (see resolveHit in WorldRoom.js). */
+  spawnFloatingText(x, y, text, color) {
     const toast = this.add
-      .text(x - 2, y - 34, `−${damage}`, { fontSize: '20px', fontStyle: 'bold', color: '#ff9d94', stroke: '#2c1210', strokeThickness: 3 })
+      .text(x - 2, y - 34, text, { fontSize: '20px', fontStyle: 'bold', color, stroke: '#2c1210', strokeThickness: 3 })
       .setOrigin(0, 0.5)
       .setDepth(20)
-    this.tweens.add({
-      targets: [spark, toast],
-      y: '-=34',
-      alpha: 0,
-      duration: 900,
-      onComplete: () => {
-        spark.destroy()
-        toast.destroy()
-      },
-    })
+    this.tweens.add({ targets: toast, y: '-=34', alpha: 0, duration: 900, onComplete: () => toast.destroy() })
   }
 
   update(time) {
@@ -1708,7 +1736,7 @@ class WorldScene extends Phaser.Scene {
   }
 
   /**
-   * Absolute set — called from WorldPage.vue's refreshCargo() after a
+   * Absolute set — called from WorldPage.vue's refreshShipStats() after a
    * fresh api.getShip() (on world load, and whenever PortModal closes,
    * since trading/buying a bigger hull/etc. all happen over plain Laravel
    * calls the room never sees, same reasoning as refresh_ship). Cargo
@@ -1724,10 +1752,29 @@ class WorldScene extends Phaser.Scene {
   }
 
   /**
+   * Called from refreshShipStats() with `speed` straight off
+   * ShipController::serialize — already the real, Паруса-boosted
+   * multiplier (see Ship::effectiveStat server-side), same scale as this
+   * client's own SHIP_SPEED_MULT table (a stock hull with no rigging
+   * returns exactly that table's value). speedMult isn't part of the
+   * Player schema (see setCargo's own comment for the identical reasoning
+   * — Оснастка levels are plain Laravel state, not something the realtime
+   * room tracks for movement, which stays entirely client-authoritative).
+   * setMaxVelocity is required alongside recomputing mySpeed — see the
+   * schema onChange handler's own comment on why the Arcade body's cap
+   * doesn't move on its own.
+   */
+  setSpeedMult(effectiveSpeed) {
+    this.speedMult = effectiveSpeed
+    this.mySpeed = SHIP_SPEED * this.speedMult
+    this.ship?.setMaxVelocity(this.mySpeed)
+  }
+
+  /**
    * Cheap incremental bump for a cargo-drop pickup (see onCargoClaimed) —
    * the exact claimed amount is already known client-side, no need to
    * round-trip a fresh api.getShip() just to add it in. Gated on cargoReady:
-   * a pickup can land before refreshCargo()'s first setCargo() call
+   * a pickup can land before refreshShipStats()'s first setCargo() call
    * resolves, and bumping cargoWeight against the still-default capacity=1
    * from create() briefly rendered the bar as full/overflowing. The DB
    * write behind this pickup happens before 'cargo_claimed' is even sent
@@ -1857,7 +1904,7 @@ function notifyCargoClaimed(gold, products) {
   const parts = []
   let weightDelta = 0
   // WorldRoom's claimCargoDropAsync already persisted this to the DB
-  // (awardBounty) — coins.value is a local display cache (see refreshCargo)
+  // (awardBounty) — coins.value is a local display cache (see refreshShipStats)
   // that nothing else keeps in sync with a pickup, so without this the
   // inventory overlay showed a stale gold count until the next port visit.
   if (gold > 0) coins.value += gold
@@ -1873,18 +1920,40 @@ function notifyCargoClaimed(gold, products) {
   Notify.create({ type: 'positive', message: `Вы подобрали груз: ${parts.join(', ')}`, position: 'top' })
 }
 
-// Cargo weight/capacity aren't in the Player schema (see setCargo's own
-// comment in WorldScene) — fetched here whenever it could have changed:
-// once on world load, and again whenever PortModal closes (trading,
-// selling, or a bigger hull's higher capacity all happen over plain
-// Laravel calls, same reasoning as room.send('refresh_ship') right above).
-async function refreshCargo() {
+// Cargo weight/capacity AND the Оснастка-boosted speed multiplier aren't
+// in the Player schema (see setCargo/setSpeedMult's own comments in
+// WorldScene) — fetched here whenever either could have changed: once on
+// world load, again whenever PortModal closes (the activePortId watch
+// below, a backstop for anything that somehow didn't emit 'ship-changed'),
+// and — this is the one that actually matters for feeling a Паруса upgrade
+// land — every single 'ship-changed' itself (see onShipChanged), not just
+// on close. It used to be close-only: input is locked the whole time
+// PortModal is open anyway, so a player could never actually FEEL a fresh
+// speed boost until after closing, but the real bug was upgrading
+// Паруса, closing, and still seeing no difference — repair/buyShip/
+// upgradeCannon all already refresh over 'ship-changed' immediately, cargo
+// and speed were the two things quietly waiting for the close-time
+// backstop instead of getting the same immediate treatment (direct
+// feedback: "проверь оно вообще применяется? я разницы не вижу").
+async function refreshShipStats() {
   try {
     const { ship } = await api.getShip()
     game?.scene.getScene('world')?.setCargo(ship.cargo_weight, ship.capacity)
+    game?.scene.getScene('world')?.setSpeedMult(ship.speed)
   } catch {
     // Best-effort cosmetic sync — a failed fetch just leaves the bar at its last known fraction.
   }
+}
+
+// PortModal's 'ship-changed' — fired the instant repair/buyShip/
+// upgradeCannon/upgradeRigging's own response actually lands (see that
+// component), not just on close. room.send('refresh_ship') covers what the
+// realtime room itself tracks (hp/shipType/cannon levels); refreshShipStats
+// covers what it doesn't (cargo, and now the Паруса speed multiplier —
+// see that function's own comment for why this used to only happen later).
+function onShipChanged() {
+  room.send('refresh_ship')
+  refreshShipStats()
 }
 
 // Was a Phaser text tween floating over the ship — sat right where the
@@ -2002,7 +2071,7 @@ onMounted(async () => {
     onBackPress: () => router.push('/'),
     onFireBroadside: noteBroadsideFired,
   })
-  refreshCargo()
+  refreshShipStats()
 })
 
 // Locks WorldScene's own movement+firing input for as long as PortModal is
@@ -2026,7 +2095,7 @@ watch(activePortId, (id, prevId) => {
   game?.scene.getScene('world')?.setInputLocked(!!id)
   if (!id && prevId) {
     room.send('refresh_ship')
-    refreshCargo()
+    refreshShipStats()
   }
 })
 

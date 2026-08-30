@@ -149,6 +149,33 @@
             </div>
           </div>
         </div>
+
+        <!-- Оснастка -->
+        <div v-if="tab === 'rigging'" class="panel panel--gunsmith">
+          <div class="row__sub">Паруса — скорость, Корпус — броня, Такелаж — уворот. Один общий уровень на каждое, не по пушке.</div>
+          <div class="cannon-grid cannon-grid--rigging">
+            <div v-for="t in rigging" :key="t.track" class="cannon-card" :class="{ 'cannon-card--maxed': t.upgrade_cost === null }">
+              <svg v-if="t.track === 'sails'" class="cannon-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L12 16 L6 16 Z"/><line x1="12" y1="3" x2="12" y2="18"/><path d="M4 18 Q12 22 20 18"/></svg>
+              <svg v-else-if="t.track === 'hull'" class="cannon-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"><path d="M12 3 L19 6 V11 C19 16 16 19.5 12 21 C8 19.5 5 16 5 11 V6 Z"/></svg>
+              <svg v-else class="cannon-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M12 5 Q19 8 12 13"/><path d="M7 21h10"/></svg>
+              <div class="cannon-card__title">{{ t.name }}</div>
+              <div class="cannon-card__level">ур. {{ t.level }}/{{ t.max_level }}</div>
+              <div class="cannon-card__stats">
+                {{ RIGGING_VALUE_META[t.track].label }}: {{ t.current_value.toFixed(RIGGING_VALUE_META[t.track].decimals) }}{{ RIGGING_VALUE_META[t.track].suffix }}
+                <template v-if="t.next_value !== null"> → {{ t.next_value.toFixed(RIGGING_VALUE_META[t.track].decimals) }}{{ RIGGING_VALUE_META[t.track].suffix }}</template>
+              </div>
+              <button
+                v-if="t.upgrade_cost !== null"
+                class="mini-btn cannon-card__btn"
+                :disabled="t.upgrade_cost > coins"
+                @click="upgradeRigging(t.track)"
+              >
+                Улучшить — {{ t.upgrade_cost }} зол
+              </button>
+              <div v-else class="cannon-card__maxed-badge">Максимум</div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -192,6 +219,7 @@ const repairPricePerHp = ref(1)
 const ship = ref(null)
 const coins = ref(0)
 const cannons = ref([])
+const rigging = ref([])
 const tab = ref('market')
 const quantities = reactive({})
 const showInfo = ref(false)
@@ -210,7 +238,18 @@ const tabs = [
   { key: 'tavern', label: 'Таверна', icon: '<rect x="5" y="8" width="10" height="11" rx="1"/><path d="M15 10 h3 a3 3 0 0 1 0 6 h-3"/>' },
   { key: 'repair', label: 'Мастерская', icon: '<path d="M8.5 6.5a3 3 0 1 0 4.24 4.24"/><line x1="11.5" y1="9.5" x2="18" y2="16"/><path d="M16 14l3.5 3.5a2 2 0 1 1-2.83 2.83L13 17"/>' },
   { key: 'gunsmith', label: 'Оружейник', icon: '<rect x="2" y="9" width="14" height="7" rx="3"/><circle cx="19" cy="12.5" r="4"/>' },
+  { key: 'rigging', label: 'Оснастка', icon: '<path d="M12 3v18"/><path d="M12 5 Q19 8 12 13"/><path d="M7 21h10"/>' },
 ]
+
+// Track key -> what to call its current effective value on the card, and
+// how many decimals actually matter (speed is a small multiplier like
+// 0.75-3.0, protection/dodge are whole percentages — see
+// Ship::riggingStatsAt server-side, this is purely display formatting).
+const RIGGING_VALUE_META = {
+  sails: { label: 'Скорость', decimals: 2, suffix: '' },
+  hull: { label: 'Броня', decimals: 0, suffix: '%' },
+  tackle: { label: 'Уворот', decimals: 0, suffix: '%' },
+}
 
 // Товары рынка (см. api/config/products.php) — по одной узнаваемой пиктограмме
 // на тип, вместо голого текста в списке. default — трюмный ящик для любого
@@ -231,7 +270,9 @@ function productIcon(type) {
 }
 
 async function load() {
-  const [portData, shipData, cannonData] = await Promise.all([api.getPort(props.portId), api.getShip(), api.getCannons(props.portId)])
+  const [portData, shipData, cannonData, riggingData] = await Promise.all([
+    api.getPort(props.portId), api.getShip(), api.getCannons(props.portId), api.getRigging(props.portId),
+  ])
   port.value = portData.port
   market.value = portData.market
   shipyard.value = portData.shipyard
@@ -240,6 +281,7 @@ async function load() {
   ship.value = shipData.ship
   coins.value = shipData.coins
   cannons.value = cannonData.cannons
+  rigging.value = riggingData.tracks
   for (const p of portData.market) quantities[p.type] = 1
   repairAmount.value = maxAffordableRepair.value || 1
 }
@@ -316,8 +358,15 @@ async function buyShip(type) {
     coins.value = data.coins
     // A bigger hull can mean more cannon slots (see Ship::ensureCannonSlots,
     // run server-side on every purchase) — re-fetch so the Оружейник tab
-    // shows them without needing a full page reload.
+    // shows them without needing a full page reload. Оснастка resets to
+    // level 0 on every swap too (see PortController::buyShip) — same
+    // reasoning, the DB is already right the instant this response lands,
+    // but the Оснастка tab's own `rigging` ref was still holding onto
+    // whatever levels/costs the OLD hull had until re-fetched (direct
+    // feedback: "при апгрейте корабля не сбросилась оснастка" — it had,
+    // just not on screen yet).
     cannons.value = (await api.getCannons(props.portId)).cannons
+    rigging.value = (await api.getRigging(props.portId)).tracks
     notifyShipSwap(data.refund)
     emit('shipChanged')
   })
@@ -361,6 +410,23 @@ async function upgradeCannon(slot) {
   await withErrorHandling(async () => {
     const data = await api.upgradeCannon(props.portId, slot)
     cannons.value = data.cannons
+    coins.value = data.coins
+    emit('shipChanged')
+  })
+}
+
+// 'shipChanged' here specifically is what gets WorldPage.vue's own ship
+// sprite actually moving faster after a Паруса upgrade (see
+// refreshShipStats/setSpeedMult there) — Корпус/Такелаж have no client-side
+// visual to update the instant they land (protection/dodge only ever
+// matter server-side, in WorldRoom.js's resolveHit, which reads
+// playerRigging fresh from the DB on its own 'refresh_ship' handler), but
+// firing it unconditionally for all three keeps this one code path simple
+// rather than special-casing which track actually needs it.
+async function upgradeRigging(track) {
+  await withErrorHandling(async () => {
+    const data = await api.upgradeRigging(props.portId, track)
+    rigging.value = data.tracks
     coins.value = data.coins
     emit('shipChanged')
   })

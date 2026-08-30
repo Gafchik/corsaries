@@ -31,11 +31,19 @@ class ShipController extends Controller
             'products' => $ship->products->mapWithKeys(fn ($p) => [$p->type => $p->quantity]),
             'sailors' => $ship->sailors->mapWithKeys(fn ($s) => [$s->type => $s->count]),
             // Hull-level stats (naval combat) — distinct from the captain's
-            // own melee stats below (boarding combat).
-            'speed' => $ship->stats()['speed'],
-            'protection' => $ship->stats()['protection'],
-            'dodge' => $ship->stats()['dodge'],
+            // own melee stats below (boarding combat). Boosted by Оснастка
+            // (see Ship::effectiveStat) — the hull's own base is what
+            // riggingStatsAt reads internally, this is what actually
+            // applies right now.
+            'speed' => round($ship->effectiveStat('sails'), 2),
+            'protection' => (int) round($ship->effectiveStat('hull')),
+            'dodge' => (int) round($ship->effectiveStat('tackle')),
             'cannon_count' => $ship->stats()['cannon_count'],
+            'rigging' => [
+                'sails' => $ship->sails_level,
+                'hull' => $ship->hull_level,
+                'tackle' => $ship->tackle_level,
+            ],
             // Captain (boarding combat) — see Ship::captainStats, the
             // original's Captain.Set_Cap_Prop derived from hired sailors.
             'captain' => $ship->captainStats(),

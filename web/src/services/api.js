@@ -94,6 +94,9 @@ export const api = {
   // gunsmith (per-cannon upgrades — see GunsmithController)
   getCannons: (portId) => request(`/ports/${portId}/cannons`),
   upgradeCannon: (portId, slot) => request(`/ports/${portId}/cannons/${slot}/upgrade`, { method: 'POST' }),
+  // Оснастка (ship-wide Паруса/Корпус/Такелаж — see RiggingController)
+  getRigging: (portId) => request(`/ports/${portId}/rigging`),
+  upgradeRigging: (portId, track) => request(`/ports/${portId}/rigging/${track}/upgrade`, { method: 'POST' }),
 
   // abordage
   startAbordagePve: (botShipType) => request('/abordage/pve', { method: 'POST', body: { bot_ship_type: botShipType } }),

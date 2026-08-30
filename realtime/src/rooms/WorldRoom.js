@@ -1,7 +1,7 @@
 import { Room } from '@colyseus/core'
 import { ArraySchema, MapSchema } from '@colyseus/schema'
 import { Player, Island, CargoDrop, createWorldState } from '../schema/WorldState.js'
-import { loadShip, saveShip, awardBounty, applyDeathPenalty, claimCargoProducts, loadShipCannonLevels } from '../db.js'
+import { loadShip, saveShip, awardBounty, applyDeathPenalty, claimCargoProducts, loadShipCannonLevels, loadShipRigging } from '../db.js'
 import { verifyToken, laravelPost, laravelGetPorts } from '../auth.js'
 import { generateIslands } from '../worldgen.js'
 
@@ -19,6 +19,27 @@ const SHIP_SPEED_MULT = {
   boat: 0.75, schooner: 0.75, caravel: 0.75, brig: 0.75,
   frigate: 1.0, galleon: 1.25, corvette: 2.0, battleship: 1.5,
 }
+// Mirrors config/ships.php's protection/dodge columns — needed here
+// (unlike speed, see the playerRigging comment in onCreate) because these
+// two gate real combat resolution in resolveHit below, not just client
+// display.
+const SHIP_PROTECTION_BASE = {
+  boat: 10, schooner: 15, caravel: 25, brig: 30,
+  frigate: 30, galleon: 35, corvette: 20, battleship: 60,
+}
+const SHIP_DODGE_BASE = {
+  boat: 10, schooner: 10, caravel: 12, brig: 7,
+  frigate: 7, galleon: 5, corvette: 13, battleship: 5,
+}
+// Mirrors config/rigging.php's level_bonus_fraction — same flat +10%/level
+// every Оснастка track uses, cannons included.
+const RIGGING_LEVEL_BONUS_FRACTION = 0.10
+// Caps on the FINAL effective value (base × rigging multiplier), not on
+// the multiplier itself — a maxed Такелаж (+50%) on a Корвет's already-high
+// 40 base dodge would otherwise reach 60%, uncomfortably close to
+// "routinely unhittable". Neither stat should ever make a hull immune.
+const RIGGING_DODGE_CAP = 70
+const RIGGING_PROTECTION_CAP = 70
 // Mirrors config/ships.php's cannon_count — every slot now fires together
 // in one free-aimed volley (see handleFire/broadsideCannons; used to be
 // split evenly into a left/right broadside, fired independently), so it
@@ -44,10 +65,16 @@ const SHIP_CANNON_COUNT = {
 // away — you'd never even see what shot you. These keep the same relative
 // identity (Battleship still reaches furthest, Corvette still trades range
 // for its speed) at distances that actually fit on screen.
+//
+// boat/schooner/caravel got a second, targeted pass — see
+// api/config/cannons.php's own comment on this same table for the full
+// reasoning (direct feedback: a Шлюпка's range was under half a second of
+// its own movement speed, nowhere near enough to actually land a shot).
+// Keep in sync by hand, same as the rest of this mirror.
 const CANNON_BASE = {
-  boat: { damage: 15, range: 78, speed: 600 },
-  schooner: { damage: 20, range: 107, speed: 650 },
-  caravel: { damage: 27, range: 145, speed: 700 },
+  boat: { damage: 15, range: 148, speed: 700 },
+  schooner: { damage: 20, range: 165, speed: 730 },
+  caravel: { damage: 27, range: 182, speed: 760 },
   brig: { damage: 37, range: 198, speed: 750 },
   frigate: { damage: 50, range: 270, speed: 820 },
   galleon: { damage: 69, range: 368, speed: 900 },
@@ -192,8 +219,11 @@ const BOT_ENGAGE_CHANCE_MIN = 0.03
 const BOT_ENGAGE_CHANCE_MAX = 0.97
 // A wounded ship runs regardless of how the fight started or how good the
 // odds looked at the time — re-checked every tick a bot is in combat, see
-// tickBots.
-const BOT_LOW_HP_FLEE_FRACTION = 0.28
+// tickBots. Lowered from 0.28 — direct feedback that bots were bailing out
+// of a fight the player had all but won, well before actually looking
+// beaten; this holds out for longer, closer to actually dying, before
+// breaking off.
+const BOT_LOW_HP_FLEE_FRACTION = 0.18
 // How far a fleeing bot will bother detouring toward a port instead of
 // just sailing straight away from the threat — real safety beats a random
 // direction, but not if the nearest one is halfway across the map.
@@ -204,10 +234,20 @@ const BOT_FLEE_PORT_SEARCH_RANGE = 1800
 // actually losing a fight a moment ago, not merely failing to catch
 // someone, so it takes longer to calm down before it'll wander back out
 // or size up another target. A bot that actually made it INTO a port
-// during this (see tickBots) also gets healed to full for free right
-// then — no gold, no ship menu, it's a bot, but "sailed into harbor,
-// patched up, sailed back out" beats a permanently half-dead patrol NPC.
+// during this (see tickBots) also gets healed for free right then — no
+// gold, no ship menu, it's a bot, but "sailed into harbor, patched up,
+// sailed back out" beats a permanently half-dead patrol NPC. This cooldown
+// starts counting only once that heal (see BOT_HEAL_DOCK_MS) actually
+// finishes, not the instant the bot arrives.
 const BOT_FLEE_RECOVER_MS = 20000
+// Minimum time standing still in port before a healing bot sails back out
+// — direct feedback that instant-full-HP-and-gone read as the bot barely
+// having arrived at all. Heals at BOT_HEAL_RATE_PER_SEC of maxHp per
+// second the whole time it's docked (see tickBots) — 10s at 10%/s always
+// reaches full from any starting HP, so this one number is both the
+// healing budget and the minimum dock time.
+const BOT_HEAL_DOCK_MS = 10000
+const BOT_HEAL_RATE_PER_SEC = 0.10
 // Fraction of the remaining angle closed per tick, at 60 ticks/sec. Was
 // 0.06 originally (too slow — a circling player could keep the bot's
 // broadside from ever lining up), bumped to 0.22 to fix that — which
@@ -292,6 +332,15 @@ export class WorldRoom extends Room {
     // loadShipCannonLevels's own comment for why that's safe) — bots never
     // get an entry, handleFire falls back to a flat table for them instead.
     this.playerCannonLevels = new Map()
+    // sessionId -> { sails_level, hull_level, tackle_level }, loaded the
+    // same way and for the same reason as playerCannonLevels — Оснастка
+    // levels (see effectiveRiggingStat/resolveHit). sails_level isn't
+    // actually read here: movement is entirely client-authoritative (see
+    // the 'move' handler), so a sails boost only ever needs to be known
+    // client-side (already-boosted via ShipController::serialize's
+    // `speed`), unlike hull/tackle which gate real server-side combat
+    // resolution. Loaded anyway for symmetry with the DB row it comes from.
+    this.playerRigging = new Map()
     this.botRuntime = new Map() // botId -> { mode, headingChangedAt }
     this.botCounter = 0
     this.cannonballs = [] // in-flight balls — see tickCannonballs()
@@ -487,12 +536,13 @@ export class WorldRoom extends Room {
     this.state.players.set(client.sessionId, player)
 
     this.playerCannonLevels.set(client.sessionId, await loadShipCannonLevels(userId))
+    this.playerRigging.set(client.sessionId, await loadShipRigging(userId))
     // No proactive send here — see 'request_broadside_stats' below for why
     // this player's own client asks for it instead, once it's actually
     // ready to listen.
   }
 
-  /** Re-reads shipType/maxHp/hp/cannon levels from the DB into an already-live Player — see the 'refresh_ship' handler's own comment for why this needs to exist at all. Same fields onJoin sets from the same loadShip/loadShipCannonLevels calls, just applied to an existing player instead of a fresh one. */
+  /** Re-reads shipType/maxHp/hp/cannon levels/rigging from the DB into an already-live Player — see the 'refresh_ship' handler's own comment for why this needs to exist at all. Same fields onJoin sets from the same loadShip/loadShipCannonLevels/loadShipRigging calls, just applied to an existing player instead of a fresh one. */
   async refreshShipFromDb(sessionId, player) {
     const saved = await loadShip(player.userId)
     if (!saved) return
@@ -500,6 +550,7 @@ export class WorldRoom extends Room {
     player.maxHp = SHIP_MAX_HP[saved.type] ?? SHIP_MAX_HP.boat
     player.hp = saved.hp
     this.playerCannonLevels.set(sessionId, await loadShipCannonLevels(player.userId))
+    this.playerRigging.set(sessionId, await loadShipRigging(player.userId))
   }
 
   /**
@@ -522,6 +573,7 @@ export class WorldRoom extends Room {
     const player = this.state.players.get(client.sessionId)
     this.state.players.delete(client.sessionId)
     this.playerCannonLevels.delete(client.sessionId)
+    this.playerRigging.delete(client.sessionId)
     if (player) await saveShip(player.userId, player)
   }
 
@@ -609,7 +661,8 @@ export class WorldRoom extends Room {
       // engageRollTargetId/engageRollResult: cached fight-or-ignore roll for
       // aggressive bots (see pickBotTarget). fleeing: currently running from
       // its target instead of fighting (see tickBots/shouldBotEngage).
-      engageRollTargetId: null, engageRollResult: false, fleeing: false,
+      // healingUntil: docked in port and repairing, see BOT_HEAL_DOCK_MS.
+      engageRollTargetId: null, engageRollResult: false, fleeing: false, healingUntil: null,
     })
   }
 
@@ -778,6 +831,20 @@ export class WorldRoom extends Room {
       const runtime = this.botRuntime.get(botId)
       if (!runtime) continue
 
+      // Docked and healing (see BOT_HEAL_DOCK_MS) — holds still for the
+      // whole dock instead of wandering off mid-repair, checked ahead of
+      // giveUpUntil below since that one's own cooldown doesn't even start
+      // until this finishes (see BOT_FLEE_RECOVER_MS's own comment).
+      if (runtime.healingUntil) {
+        if (now < runtime.healingUntil) {
+          bot.hp = Math.min(bot.maxHp, bot.hp + bot.maxHp * BOT_HEAL_RATE_PER_SEC * (deltaMs / 1000))
+          this.advance(bot, 0, deltaMs)
+          continue
+        }
+        runtime.healingUntil = null
+        runtime.giveUpUntil = now + BOT_FLEE_RECOVER_MS
+      }
+
       if (runtime.giveUpUntil && now < runtime.giveUpUntil) {
         this.patrolStep(bot, runtime, now, deltaMs)
         continue
@@ -813,16 +880,19 @@ export class WorldRoom extends Room {
 
       if (runtime.fleeing) {
         if (this.isNearAnyPort(bot.x, bot.y)) {
-          // Reached safety — same "cool off before caring about anyone
-          // again" shape as a timed-out chase just above, only longer:
-          // this bot was actually losing a fight, not merely failing to
-          // catch someone (see BOT_FLEE_RECOVER_MS's own comment).
+          // Reached safety — docks and heals gradually instead of an
+          // instant full-HP teleport-to-fine (direct feedback: a bot that
+          // was moments from sinking just vanishing and reappearing
+          // topped-up the same tick read as it not really having escaped
+          // anything). See the healingUntil check at the top of this loop
+          // for the actual healing/hold-still — giveUpUntil (still the
+          // same "cool off before caring about anyone again" cooldown a
+          // timed-out chase above also uses) only starts once that's done.
           runtime.fleeing = false
           runtime.chaseStartedAt = null
-          runtime.giveUpUntil = now + BOT_FLEE_RECOVER_MS
-          bot.hp = bot.maxHp
+          runtime.healingUntil = now + BOT_HEAL_DOCK_MS
           if (runtime.temperament === 'calm') runtime.provokedBy = null
-          this.patrolStep(bot, runtime, now, deltaMs)
+          this.advance(bot, 0, deltaMs)
         } else {
           this.fleeStep(bot, runtime, target.player, deltaMs)
         }
@@ -1201,12 +1271,45 @@ export class WorldRoom extends Room {
     return null
   }
 
+  /**
+   * This ship's real, currently-in-effect protection or dodge — base stat
+   * for its hull type (see SHIP_PROTECTION_BASE/SHIP_DODGE_BASE) boosted by
+   * whatever Оснастка level is actually stored (see playerRigging), capped
+   * so neither stat ever approaches "can't be hit"/"can't be hurt". Bots
+   * have no playerRigging entry (no account to own an upgrade) and fall
+   * back to level 0 — a stock hull's own base, same pattern
+   * playerCannonLevels already uses for them.
+   */
+  effectiveRiggingStat(sessionId, shipType, track) {
+    const base = (track === 'dodge' ? SHIP_DODGE_BASE : SHIP_PROTECTION_BASE)[shipType] ?? 0
+    const column = track === 'dodge' ? 'tackle_level' : 'hull_level'
+    const level = this.playerRigging.get(sessionId)?.[column] ?? 0
+    const cap = track === 'dodge' ? RIGGING_DODGE_CAP : RIGGING_PROTECTION_CAP
+
+    return Math.min(base * (1 + RIGGING_LEVEL_BONUS_FRACTION * level), cap)
+  }
+
   resolveHit(attackerId, targetId, target, damage) {
     const attacker = this.state.players.get(attackerId)
     if (!attacker) return
 
-    target.hp = Math.max(0, target.hp - damage)
-    this.broadcast('hit', { attackerId, targetId, damage, hp: target.hp })
+    // Rolled before anything else — a dodged shot deals no damage and
+    // isn't a "hit" at all client-side (see the 'dodged' broadcast below),
+    // just a distinct floating "Уворот" instead of a damage number, same
+    // idea as spawnDamageNumber but the word instead of the amount (direct
+    // request). The cannonball itself still gets consumed here exactly
+    // like a real hit would (see tickCannonballs' caller) — it reached the
+    // target, the target just wasn't where the shot could catch it.
+    if (Math.random() * 100 < this.effectiveRiggingStat(targetId, target.shipType, 'dodge')) {
+      this.broadcast('dodged', { attackerId, targetId })
+      return
+    }
+
+    const protection = this.effectiveRiggingStat(targetId, target.shipType, 'protection')
+    const mitigatedDamage = Math.max(0, Math.round(damage * (1 - protection / 100)))
+
+    target.hp = Math.max(0, target.hp - mitigatedDamage)
+    this.broadcast('hit', { attackerId, targetId, damage: mitigatedDamage, hp: target.hp })
 
     if (target.isBot) {
       const targetRuntime = this.botRuntime.get(targetId)
