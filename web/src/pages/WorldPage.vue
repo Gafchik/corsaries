@@ -201,6 +201,17 @@ const SHIP_SPEED_MULT = {
   boat: 0.75, schooner: 0.75, caravel: 0.75, brig: 0.75,
   frigate: 1.0, galleon: 1.25, corvette: 2.0, battleship: 1.5,
 }
+// A damaged hull sails slower — torn sails, a battered rudder, that kind
+// of thing (direct request: "после боя корабль медленнее плывет"). Linear
+// from full speed at full HP down to this floor at 0 HP, not all the way
+// to a dead stop — a ship that's actually losing a fight needs speed to
+// disengage MORE than a healthy one does, not less; a floor near 0 would
+// turn "badly hurt" into "can't run either", the exact opposite of what
+// the flee-to-port mechanic (see WorldRoom.js) already exists to let a
+// damaged ship do. Applied client-side only, same trust model movement
+// already has (see the 'move' handler in WorldRoom.js — fully
+// client-authoritative, this doesn't change that).
+const HP_SPEED_DEBUFF_FLOOR = 0.5
 // The pack's smallest hulls (boat/schooner) are drawn as tiny detail-less
 // dinghies — at a uniform 0.5 scale they read as an unreadable dot on
 // screen. Scaling per tier instead keeps a boat visible while still making
@@ -1226,7 +1237,8 @@ class WorldScene extends Phaser.Scene {
 
       if (vx !== 0 || vy !== 0) {
         const len = Math.hypot(vx, vy)
-        this.ship.setVelocity((vx / len) * this.mySpeed, (vy / len) * this.mySpeed)
+        const speed = this.mySpeed * this.hpSpeedMult()
+        this.ship.setVelocity((vx / len) * speed, (vy / len) * speed)
         this.ship.setRotation(Math.atan2(vy, vx) + Math.PI / 2)
       } else {
         this.ship.setVelocity(0, 0)
@@ -1699,6 +1711,20 @@ class WorldScene extends Phaser.Scene {
     const fill = this.add.image(x, y, 'hp-bar-fill-good').setOrigin(0, 0.5).setDepth(11)
     fill.setCrop(0, 0, HP_BAR_WIDTH, HP_BAR_HEIGHT)
     return { bg, fill }
+  }
+
+  /**
+   * Fraction of full speed available right now, straight off live HP — see
+   * HP_SPEED_DEBUFF_FLOOR's own comment for the floor/reasoning. Read fresh
+   * every frame movement is applied (this.meRef.hp already updates every
+   * tick via the schema, same source updateHpBar reads for the HP bar
+   * itself), not cached anywhere — speed should visibly recover the
+   * instant a repair at the Мастерская lands, same tick the HP bar does.
+   */
+  hpSpeedMult() {
+    const hp = this.meRef?.hp ?? this.myMaxHp
+    const fraction = this.myMaxHp > 0 ? Phaser.Math.Clamp(hp / this.myMaxHp, 0, 1) : 1
+    return HP_SPEED_DEBUFF_FLOOR + (1 - HP_SPEED_DEBUFF_FLOOR) * fraction
   }
 
   updateHpBar(bar, shipX, shipY, hp, maxHp) {

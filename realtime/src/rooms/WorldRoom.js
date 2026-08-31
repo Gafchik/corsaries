@@ -19,6 +19,11 @@ const SHIP_SPEED_MULT = {
   boat: 0.75, schooner: 0.75, caravel: 0.75, brig: 0.75,
   frigate: 1.0, galleon: 1.25, corvette: 2.0, battleship: 1.5,
 }
+// Mirrors HP_SPEED_DEBUFF_FLOOR in WorldPage.vue — a damaged bot sails
+// slower too (see botSpeed), same linear-down-to-a-floor shape and same
+// reasoning: a bot losing a fight needs speed to actually reach a port and
+// flee (see fleeStep) MORE than a healthy one does, not less.
+const HP_SPEED_DEBUFF_FLOOR = 0.5
 // Mirrors config/ships.php's protection/dodge columns — needed here
 // (unlike speed, see the playerRigging comment in onCreate) because these
 // two gate real combat resolution in resolveHit below, not just client
@@ -941,7 +946,7 @@ export class WorldRoom extends Room {
     // Full speed, not a patrol-only fraction — see the BOT_SPEED comment,
     // a slower patrol pace is exactly what let a wandering Corvette read as
     // slower than a player's own Boat.
-    const moved = this.advance(bot, this.botSpeed(runtime), deltaMs)
+    const moved = this.advance(bot, this.botSpeed(bot, runtime), deltaMs)
 
     if (!moved) {
       // Still got blocked despite steering (e.g. caught mid-turn) — reroll
@@ -991,7 +996,7 @@ export class WorldRoom extends Room {
     // flipped before, which pointed the bot roughly away from its target.
     const heading = Math.atan2(targetPlayer.y - bot.y, targetPlayer.x - bot.x) + Math.PI / 2
     this.turnToward(bot, heading)
-    this.advance(bot, this.botSpeed(runtime), deltaMs)
+    this.advance(bot, this.botSpeed(bot, runtime), deltaMs)
   }
 
   /**
@@ -1027,7 +1032,7 @@ export class WorldRoom extends Room {
     // obstacle check just biased toward a direction instead of random.
     const heading = this.pickHeadingToward(bot, goalHeading)
     this.turnToward(bot, heading)
-    this.advance(bot, this.botSpeed(runtime), deltaMs)
+    this.advance(bot, this.botSpeed(bot, runtime), deltaMs)
   }
 
   /**
@@ -1051,8 +1056,10 @@ export class WorldRoom extends Room {
     return bot.rotation + Math.PI // fully boxed in — same last-resort reversal pickClearHeading uses
   }
 
-  botSpeed(runtime) {
-    return BOT_SPEED * (SHIP_SPEED_MULT[runtime.shipType] ?? 1)
+  botSpeed(bot, runtime) {
+    const hpFraction = bot.maxHp > 0 ? Math.max(0, Math.min(1, bot.hp / bot.maxHp)) : 1
+    const hpMult = HP_SPEED_DEBUFF_FLOOR + (1 - HP_SPEED_DEBUFF_FLOOR) * hpFraction
+    return BOT_SPEED * (SHIP_SPEED_MULT[runtime.shipType] ?? 1) * hpMult
   }
 
   /**
